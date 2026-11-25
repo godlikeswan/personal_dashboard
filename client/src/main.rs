@@ -340,9 +340,9 @@ impl eframe::App for DashboardApp {
         let main_height = (bottom_top - main_top - 10.0).max(160.0);
         let section_gap = 12.0;
         let available_height = (main_height - section_gap).max(0.0);
-        let tasks_schedule_height = (available_height * 0.4)
+        let tasks_schedule_height = (available_height * 0.55)
             .max(90.0)
-            .min(available_height * 0.5);
+            .min(available_height * 0.65);
         let calendar_height = available_height - tasks_schedule_height;
         let half_width = screen.width() * 0.5;
         let calendar_top = main_top + tasks_schedule_height + section_gap;
@@ -966,13 +966,10 @@ fn draw_five_day_timeline(
     let grid_stroke = egui::Stroke::new(0.5, ui.visuals().widgets.noninteractive.bg_stroke.color);
     let painter = ui.painter();
 
-    for index in 0..5 {
-        let y = rect.min.y + index as f32 * row_height;
-        painter.hline(
-            egui::Rangef::new(rect.min.x, rect.max.x),
-            y + row_height,
-            grid_stroke,
-        );
+    // Only the separators between rows. The bottom edge is the countdown strip's line.
+    for index in 0..4 {
+        let y = rect.min.y + (index as f32 + 1.0) * row_height;
+        painter.hline(egui::Rangef::new(rect.min.x, rect.max.x), y, grid_stroke);
     }
 
     for hour in (0..=24).step_by(3) {
@@ -997,6 +994,7 @@ fn draw_five_day_timeline(
 
     #[derive(Clone)]
     struct Segment {
+        day_index: usize,
         x0: f32,
         x1: f32,
         y: f32,
@@ -1031,10 +1029,10 @@ fn draw_five_day_timeline(
         }
 
         let number = number_by_index.get(index).copied().flatten();
-        let bar_height = (row_height * 0.42).clamp(8.0, 14.0);
 
         for day_index in first_day..=last_day {
-            let day_date = now.date_naive() + ChronoDuration::days(day_index);
+            let day_index = day_index as usize;
+            let day_date = now.date_naive() + ChronoDuration::days(day_index as i64);
             let Some(row_start) = day_date
                 .and_hms_opt(0, 0, 0)
                 .and_then(|naive| naive.and_local_timezone(Local).earliest())
@@ -1048,14 +1046,13 @@ fn draw_five_day_timeline(
                 continue;
             }
 
-            let y = rect.min.y + day_index as f32 * row_height + (row_height - bar_height) * 0.5;
-
             if event.all_day {
                 segments.push(Segment {
+                    day_index,
                     x0: plot_x,
                     x1: rect.max.x,
-                    y,
-                    height: bar_height,
+                    y: 0.0,
+                    height: 0.0,
                     number,
                     all_day: true,
                     is_head: segment_start == start,
@@ -1076,15 +1073,70 @@ fn draw_five_day_timeline(
                 .max(x0 + 1.0);
 
             segments.push(Segment {
+                day_index,
                 x0,
                 x1,
-                y,
-                height: bar_height,
+                y: 0.0,
+                height: 0.0,
                 number,
                 all_day: false,
                 is_head: segment_start == start,
             });
         }
+    }
+
+    // Give overlapping events separate lanes. A row with one event gets one
+    // full-height lane; concurrent events split the row evenly.
+    let mut lane_ends = vec![Vec::<f32>::new(); 5];
+    let mut lane_of = vec![0usize; segments.len()];
+    let mut lane_counts = [1usize; 5];
+
+    for day in 0..5 {
+        let mut indices = segments
+            .iter()
+            .enumerate()
+            .filter(|(_, segment)| segment.day_index == day)
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        indices.sort_by(|&left, &right| {
+            segments[left]
+                .x0
+                .total_cmp(&segments[right].x0)
+                .then_with(|| segments[left].x1.total_cmp(&segments[right].x1))
+        });
+
+        for index in indices {
+            let x0 = segments[index].x0;
+            let mut available = None;
+            for (candidate, &end) in lane_ends[day].iter().enumerate() {
+                if end <= x0 + 1.0 {
+                    available = Some(candidate);
+                    break;
+                }
+            }
+
+            let lane = match available {
+                Some(found) => {
+                    lane_ends[day][found] = segments[index].x1;
+                    found
+                }
+                None => {
+                    lane_ends[day].push(segments[index].x1);
+                    lane_ends[day].len() - 1
+                }
+            };
+            lane_of[index] = lane;
+        }
+
+        lane_counts[day] = lane_ends[day].len().max(1);
+    }
+
+    for (index, segment) in segments.iter_mut().enumerate() {
+        let day = segment.day_index;
+        let lane_height = row_height / lane_counts[day] as f32;
+        segment.y =
+            rect.min.y + day as f32 * row_height + lane_of[index] as f32 * lane_height + 1.0;
+        segment.height = (lane_height - 2.0).max(3.0);
     }
 
     // Draw every bar first, then every number, so later events cannot paint over
@@ -1108,7 +1160,7 @@ fn draw_five_day_timeline(
             painter.rect_filled(
                 egui::Rect::from_min_max(
                     egui::pos2(segment.x0, segment.y),
-                    egui::pos2(segment.x0 + 2.0, segment.y + segment.height),
+                    egui::pos2(segment.x0 + 3.0, segment.y + segment.height),
                 ),
                 0.0,
                 egui::Color32::from_rgba_premultiplied(130, 180, 250, 220),
@@ -1121,25 +1173,25 @@ fn draw_five_day_timeline(
             continue;
         };
 
+        let font_size = (segment.height * 0.78).clamp(12.0, 34.0);
+        let text_y = segment.y + (segment.height - font_size) * 0.5;
+
         // Right-anchor numbers that finish near the timeline edge so heads
         // cutting across midnight stay inside the visible area.
-        let (pos, anchor) = if segment.x1 > rect.max.x - 40.0 {
+        let (pos, anchor) = if segment.x1 > rect.max.x - 60.0 {
             (
-                egui::pos2(segment.x1 - 4.0, segment.y + 1.0),
+                egui::pos2(segment.x1 - 6.0, text_y),
                 egui::Align2::RIGHT_TOP,
             )
         } else {
-            (
-                egui::pos2(segment.x0 + 4.0, segment.y + 1.0),
-                egui::Align2::LEFT_TOP,
-            )
+            (egui::pos2(segment.x0 + 6.0, text_y), egui::Align2::LEFT_TOP)
         };
 
         painter.text(
             pos,
             anchor,
             number.to_string(),
-            egui::FontId::proportional(11.0),
+            egui::FontId::proportional(font_size),
             egui::Color32::WHITE,
         );
     }
