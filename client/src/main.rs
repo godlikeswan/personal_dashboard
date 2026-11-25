@@ -412,13 +412,14 @@ impl eframe::App for DashboardApp {
         let task_font = task_font_size(ui, &tasks, half_width - 24.0);
         let task_row_height = task_font * 1.55;
 
-        let schedule_candidates = numbered_schedule(&general, now, 24).0;
-        let schedule_font = schedule_font_size(ui, &schedule_candidates, half_width - 24.0);
+        let (schedule_rows, number_by_index) = numbered_schedule(&general, now);
+        let schedule_font = schedule_font_size(
+            ui,
+            &schedule_rows,
+            half_width - 24.0,
+            tasks_schedule_height - 8.0,
+        );
         let schedule_row_height = schedule_font * 1.55;
-        let schedule_capacity = ((tasks_schedule_height - 12.0) / schedule_row_height)
-            .max(0.0)
-            .floor() as usize;
-        let (schedule_rows, number_by_index) = numbered_schedule(&general, now, schedule_capacity);
 
         draw_task_panel(ui, tasks_rect, &tasks, task_font, task_row_height);
         draw_schedule_panel(
@@ -573,25 +574,37 @@ fn schedule_time(event: &CalendarEvent) -> String {
     }
 }
 
+fn effective_end(event: &CalendarEvent, start: DateTime<Local>) -> DateTime<Local> {
+    let mut end = event
+        .ends_at
+        .unwrap_or_else(|| start + ChronoDuration::hours(1));
+
+    if end <= start {
+        end = start + ChronoDuration::minutes(15);
+    }
+
+    end
+}
+
+fn calendar_days(event: &CalendarEvent, now: DateTime<Local>) -> Option<(i64, i64)> {
+    let start = event.starts_at?;
+    let end = effective_end(event, start);
+    let first_day = (start.date_naive() - now.date_naive()).num_days().max(0);
+    let last_day = ((end - ChronoDuration::nanoseconds(1)).date_naive() - now.date_naive())
+        .num_days()
+        .min(4);
+
+    (first_day <= last_day).then_some((first_day, last_day))
+}
+
 fn numbered_schedule(
     events: &[CalendarEvent],
     now: DateTime<Local>,
-    limit: usize,
 ) -> (Vec<ScheduleRow>, Vec<Option<usize>>) {
-    let window_end = now + ChronoDuration::days(5);
     let mut candidates = events
         .iter()
         .enumerate()
-        .filter_map(|(index, event)| {
-            let start = event.starts_at?;
-            let end = event
-                .ends_at
-                .unwrap_or_else(|| start + ChronoDuration::hours(1));
-            if end <= now || start >= window_end {
-                return None;
-            }
-            Some((index, event))
-        })
+        .filter(|(_, event)| calendar_days(event, now).is_some())
         .collect::<Vec<_>>();
 
     candidates.sort_by(|(left_index, left), (right_index, right)| {
@@ -599,7 +612,6 @@ fn numbered_schedule(
             .cmp(&right.starts_at)
             .then_with(|| left_index.cmp(right_index))
     });
-    candidates.truncate(limit);
 
     let mut numbers = vec![None; events.len()];
     let rows = candidates
@@ -619,7 +631,7 @@ fn numbered_schedule(
     (rows, numbers)
 }
 
-fn schedule_font_size(ui: &egui::Ui, rows: &[ScheduleRow], max_width: f32) -> f32 {
+fn schedule_font_size(ui: &egui::Ui, rows: &[ScheduleRow], max_width: f32, max_height: f32) -> f32 {
     if rows.is_empty() {
         return 18.0;
     }
@@ -638,8 +650,11 @@ fn schedule_font_size(ui: &egui::Ui, rows: &[ScheduleRow], max_width: f32) -> f3
             .fold(0.0_f32, f32::max)
     });
 
-    let available = (max_width - 8.0).max(1.0);
-    (reference_size * available / longest.max(1.0)).clamp(14.0, 28.0)
+    let available_width = (max_width - 8.0).max(1.0);
+    let width_font = reference_size * available_width / longest.max(1.0);
+    let height_font = (max_height / rows.len() as f32 / 1.55).max(0.0);
+
+    width_font.min(height_font).clamp(8.0, 28.0)
 }
 
 fn draw_task_panel(
@@ -744,9 +759,6 @@ fn draw_schedule_panel(
 
     for (index, row) in rows.iter().enumerate() {
         let y = rect.min.y + 4.0 + index as f32 * row_height;
-        if y + row_height > rect.max.y {
-            break;
-        }
 
         painter.text(
             egui::pos2(rect.min.x, y),
@@ -1065,19 +1077,10 @@ fn draw_five_day_timeline(
         let Some(start) = event.starts_at else {
             continue;
         };
-
-        let mut end = event.ends_at.unwrap_or(start + ChronoDuration::hours(1));
-        if end <= start {
-            end = start + ChronoDuration::minutes(15);
-        }
-
-        let first_day = (start.date_naive() - now.date_naive()).num_days().max(0);
-        let last_day = ((end - ChronoDuration::nanoseconds(1)).date_naive() - now.date_naive())
-            .num_days()
-            .min(4);
-        if first_day > last_day {
+        let Some((first_day, last_day)) = calendar_days(event, now) else {
             continue;
-        }
+        };
+        let end = effective_end(event, start);
 
         let number = number_by_index.get(index).copied().flatten();
 
@@ -1225,22 +1228,14 @@ fn draw_five_day_timeline(
         };
 
         let font_size = (segment.height * 0.78).clamp(12.0, 34.0);
-        let text_y = segment.y + (segment.height - font_size) * 0.5;
-
-        // Right-anchor numbers that finish near the timeline edge so heads
-        // cutting across midnight stay inside the visible area.
-        let (pos, anchor) = if segment.x1 > rect.max.x - 60.0 {
-            (
-                egui::pos2(segment.x1 - 6.0, text_y),
-                egui::Align2::RIGHT_TOP,
-            )
-        } else {
-            (egui::pos2(segment.x0 + 6.0, text_y), egui::Align2::LEFT_TOP)
-        };
+        let center = egui::pos2(
+            (segment.x0 + segment.x1) * 0.5,
+            segment.y + segment.height * 0.5,
+        );
 
         painter.text(
-            pos,
-            anchor,
+            center,
+            egui::Align2::CENTER_CENTER,
             number.to_string(),
             egui::FontId::proportional(font_size),
             egui::Color32::WHITE,
@@ -1539,6 +1534,7 @@ fn send(ctx: &egui::Context, tx: &UnboundedSender<AppEvent>, event: AppEvent) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
 
     #[test]
     fn schedule_time_formats_timed_event() {
@@ -1574,13 +1570,43 @@ mod tests {
         };
 
         let events = vec![second, first];
-        let (rows, numbers) = numbered_schedule(&events, now, 10);
+        let (rows, numbers) = numbered_schedule(&events, now);
 
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].summary, "First");
         assert_eq!(rows[1].summary, "Second");
         assert_eq!(numbers[0], Some(2));
         assert_eq!(numbers[1], Some(1));
+    }
+
+    #[test]
+    fn schedule_includes_events_that_already_ended_today() {
+        let now = Local
+            .with_ymd_and_hms(2077, 6, 15, 12, 0, 0)
+            .earliest()
+            .expect("valid test time");
+        let event = CalendarEvent {
+            summary: "Morning".to_string(),
+            all_day: false,
+            starts_at: Some(
+                Local
+                    .with_ymd_and_hms(2077, 6, 15, 9, 0, 0)
+                    .earliest()
+                    .expect("valid test time"),
+            ),
+            ends_at: Some(
+                Local
+                    .with_ymd_and_hms(2077, 6, 15, 10, 0, 0)
+                    .earliest()
+                    .expect("valid test time"),
+            ),
+        };
+
+        let (rows, numbers) = numbered_schedule(&[event], now);
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].summary, "Morning");
+        assert_eq!(numbers[0], Some(1));
     }
 
     #[test]
