@@ -1293,6 +1293,18 @@ fn countdown_label(days: i64, summary: &str) -> String {
 fn main() -> eframe::Result {
     config::load_dotenv();
     logging::log("Dashboard starting");
+    logging::log(&format!(
+        "Config directory: {}",
+        config::config_dir().display()
+    ));
+    logging::log(&format!("Relay domain: {}", config::relay_domain()));
+    logging::log(&format!("Renderer: {:?}", eframe::Renderer::default()));
+
+    let default_panic_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        logging::log(&format!("Dashboard panicked: {info}"));
+        default_panic_hook(info);
+    }));
 
     // Select exactly one Rustls crypto provider for HTTPS and WSS.
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -1302,14 +1314,26 @@ fn main() -> eframe::Result {
         .with_decorations(false)
         .with_fullscreen(true);
 
-    eframe::run_native(
+    let result = eframe::run_native(
         "Personal Dashboard",
         eframe::NativeOptions {
             viewport,
             ..Default::default()
         },
-        Box::new(|cc| Ok(Box::new(DashboardApp::new(cc.egui_ctx.clone())))),
-    )
+        Box::new(|cc| {
+            logging::log("Creating dashboard app");
+            let app = DashboardApp::new(cc.egui_ctx.clone());
+            logging::log("Dashboard app ready");
+            Ok(Box::new(app))
+        }),
+    );
+
+    match &result {
+        Ok(()) => logging::log("Dashboard window closed"),
+        Err(error) => logging::log(&format!("Dashboard failed: {error}")),
+    }
+
+    result
 }
 
 fn subscription_message() -> String {
