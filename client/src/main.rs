@@ -2,6 +2,7 @@
 
 mod calendar;
 mod config;
+mod demo;
 mod logging;
 mod oauth;
 mod tokens;
@@ -75,6 +76,7 @@ impl DashboardApp {
         let tokens = TokenManager::from_env();
         let has_refresh_token = config::env_nonempty("GOOGLE_REFRESH_TOKEN").is_some();
         let has_client_id = config::google_client_id().is_some();
+        let demo_mode = demo::enabled();
 
         let (tx, rx) = mpsc::unbounded_channel();
 
@@ -82,6 +84,40 @@ impl DashboardApp {
             .enable_all()
             .build()
             .expect("failed to start tokio runtime");
+
+        let watch_configs = [
+            ("primary", ""),
+            ("todo", "_TODO"),
+            ("important", "_IMPORTANT"),
+        ]
+        .into_iter()
+        .map(|(alias, suffix)| WatchConfig::for_calendar(alias, suffix))
+        .collect::<Vec<_>>();
+
+        if demo_mode {
+            logging::log("Demo mode enabled");
+
+            return Self {
+                ctx,
+                tx,
+                rx,
+                status: "Demo mode".to_string(),
+                fetch_status: "Mock calendars".to_string(),
+                watch_status: "Mock data".to_string(),
+                auth_status: "Demo data".to_string(),
+                signing_in: false,
+                signed_in: true,
+                latest_signal: "Mock signal".to_string(),
+                todo_events: demo::todo_events(),
+                important_events: demo::important_events(),
+                general_events: demo::general_events(),
+                weather: Some(demo::weather()),
+                weather_status: "Demo weather".to_string(),
+                tokens,
+                watch_configs,
+                _runtime: runtime,
+            };
+        }
 
         let task_ctx = ctx.clone();
         let ws_tx = tx.clone();
@@ -102,15 +138,6 @@ impl DashboardApp {
         runtime.spawn(async move {
             weather_loop(weather_ctx, weather_tx).await;
         });
-
-        let watch_configs = [
-            ("primary", ""),
-            ("todo", "_TODO"),
-            ("important", "_IMPORTANT"),
-        ]
-        .into_iter()
-        .map(|(alias, suffix)| WatchConfig::for_calendar(alias, suffix))
-        .collect::<Vec<_>>();
 
         for config_values in &watch_configs {
             let watch_ctx = ctx.clone();

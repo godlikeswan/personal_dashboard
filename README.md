@@ -117,3 +117,12 @@ Put the built executable in a folder with your `dashboard-settings.txt`, then ru
 ```powershell
 cargo run
 ```
+
+### 4. Demo data for screenshots
+
+Set `DASHBOARD_DEMO=1` to show mock tasks, events, weather, and countdowns. Demo mode runs entirely offline, so it is handy for screenshots and UI checks.
+
+```powershell
+$env:DASHBOARD_DEMO = '1'
+cargo run
+```

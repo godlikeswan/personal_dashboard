@@ -51,6 +51,7 @@ The window opens fullscreen. On Windows, press `Alt+F4` to exit. Status messages
 | Variable | Default | Purpose |
 |---|---|---|
 | `DASHBOARD_RELAY_DOMAIN` | `127.0.0.1:8787` locally, embedded at build time for releases | Relay host; client derives `wss://<domain>/ws` and `https://<domain>/webhook` |
+| `DASHBOARD_DEMO` | off | Set to `1` to show mock events, tasks, weather, and countdowns |
 | `GOOGLE_CLIENT_ID_OVERRIDE` | value embedded at build time | OAuth Desktop app client ID |
 | `GOOGLE_CLIENT_SECRET_OVERRIDE` | value embedded at build time | OAuth client secret |
 | `GOOGLE_REFRESH_TOKEN` | written by sign-in | Long-lived token |
@@ -84,6 +85,15 @@ Set `FALLBACK_SYNC_MINUTES` to change the background refresh interval:
 
 ```env
 FALLBACK_SYNC_MINUTES=15
+```
+
+## Demo data
+
+Set `DASHBOARD_DEMO=1` to fill the dashboard with mock tasks, events, weather, and countdowns. This is useful for screenshots and UI tests. The dashboard skips sign-in, calendar, relay, and weather requests in demo mode.
+
+```powershell
+$env:DASHBOARD_DEMO = '1'
+cargo run
 ```
 
 ## Calendar aliases
