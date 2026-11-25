@@ -307,15 +307,21 @@ impl eframe::App for DashboardApp {
         let signed_in = self.signed_in;
 
         // Top row: clock and date on the left, weather on the right.
+        let weather_font_size = 56.0;
+        let weather_icon_size = 52.0;
+        let weather_icon_y_offset = ui.ctx().fonts_mut(|fonts| {
+            fonts.row_height(&egui::FontId::proportional(weather_font_size)) - weather_icon_size
+        }) * 0.5;
+
         ui.columns(2, |columns| {
             draw_clock_date(&mut columns[0], now);
 
             columns[1].with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
                 if let Some(current) = &weather {
-                    draw_weather_icon(ui, current.code, 64.0, 6.0);
+                    draw_weather_icon(ui, current.code, weather_icon_size, weather_icon_y_offset);
                     ui.label(
                         egui::RichText::new(format!("{:.0}°C", current.temperature))
-                            .size(56.0)
+                            .size(weather_font_size)
                             .strong()
                             .color(egui::Color32::WHITE),
                     );
@@ -912,19 +918,25 @@ fn draw_bottom_strip(
         .collect::<Vec<_>>();
     countdowns.sort_by_key(|(days, _)| *days);
 
+    let countdown_font_size = 32.0;
+    let countdown_row_height = ui
+        .ctx()
+        .fonts_mut(|fonts| fonts.row_height(&egui::FontId::proportional(countdown_font_size)));
+    let countdown_y = rect.center().y - countdown_row_height * 0.5;
+
     if countdowns.is_empty() {
         painter.text(
-            egui::pos2(rect.min.x + 18.0, rect.min.y + 16.0),
+            egui::pos2(rect.min.x + 18.0, countdown_y),
             egui::Align2::LEFT_TOP,
             "No important events",
-            egui::FontId::proportional(18.0),
+            egui::FontId::proportional(countdown_font_size),
             weak_color,
         );
     }
 
     let mut x = rect.min.x + 18.0;
-    let y = rect.min.y + 16.0;
-    let font = egui::FontId::proportional(22.0);
+    let y = countdown_y;
+    let font = egui::FontId::proportional(countdown_font_size);
     for (days, summary) in countdowns {
         let text = countdown_label(days, &summary);
 
