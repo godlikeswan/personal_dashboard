@@ -47,16 +47,71 @@ pub fn google_client_secret() -> Option<String> {
         .or_else(|| embedded(option_env!("GOOGLE_CLIENT_SECRET")))
 }
 
+const DEFAULT_RELAY_DOMAIN: &str = "127.0.0.1:8787";
+
+pub fn relay_domain() -> String {
+    env_nonempty("DASHBOARD_RELAY_DOMAIN")
+        .or_else(|| embedded(option_env!("DASHBOARD_RELAY_DOMAIN")))
+        .map(normalize_relay_domain)
+        .filter(|domain| !domain.is_empty())
+        .unwrap_or_else(|| DEFAULT_RELAY_DOMAIN.to_string())
+}
+
+fn normalize_relay_domain(value: String) -> String {
+    let mut value = value.trim().to_string();
+    let lower = value.to_ascii_lowercase();
+
+    for prefix in ["wss://", "ws://", "https://", "http://"] {
+        if lower.starts_with(prefix) {
+            value = value[prefix.len()..].to_string();
+            break;
+        }
+    }
+
+    value = value.trim_end_matches('/').to_string();
+
+    for suffix in ["/ws", "/webhook"] {
+        if let Some(rest) = value.strip_suffix(suffix) {
+            value = rest.trim_end_matches('/').to_string();
+            break;
+        }
+    }
+
+    value
+}
+
+fn is_local_relay_domain(domain: &str) -> bool {
+    let host = if let Some(rest) = domain.strip_prefix('[') {
+        rest.split(']').next().unwrap_or(rest)
+    } else {
+        domain.split(':').next().unwrap_or(domain)
+    }
+    .to_ascii_lowercase();
+
+    matches!(host.as_str(), "localhost" | "127.0.0.1" | "::1")
+}
+
+fn relay_urls(domain: &str) -> (String, String) {
+    let (ws_scheme, http_scheme) = if is_local_relay_domain(domain) {
+        ("ws", "http")
+    } else {
+        ("wss", "https")
+    };
+
+    (
+        format!("{ws_scheme}://{domain}/ws"),
+        format!("{http_scheme}://{domain}/webhook"),
+    )
+}
+
 pub fn dashboard_ws_url() -> String {
-    env_nonempty("DASHBOARD_WS_URL")
-        .or_else(|| embedded(option_env!("DASHBOARD_WS_URL")))
-        .unwrap_or_else(|| "ws://127.0.0.1:8787/ws".to_string())
+    let (ws_url, _) = relay_urls(&relay_domain());
+    ws_url
 }
 
 pub fn google_webhook_url() -> String {
-    env_nonempty("GOOGLE_WEBHOOK_URL")
-        .or_else(|| embedded(option_env!("GOOGLE_WEBHOOK_URL")))
-        .unwrap_or_else(|| "http://127.0.0.1:8787/webhook".to_string())
+    let (_, webhook_url) = relay_urls(&relay_domain());
+    webhook_url
 }
 
 fn usable(value: String) -> Option<String> {
@@ -149,4 +204,57 @@ pub fn random_token(byte_count: usize) -> String {
     }
 
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn derives_remote_relay_urls() {
+        let domain = "personal-dashboard-relay.example.workers.dev";
+        assert_eq!(
+            relay_urls(domain),
+            (
+                "wss://personal-dashboard-relay.example.workers.dev/ws".to_string(),
+                "https://personal-dashboard-relay.example.workers.dev/webhook".to_string(),
+            )
+        );
+    }
+
+    #[test]
+    fn derives_local_relay_urls() {
+        assert_eq!(
+            relay_urls("127.0.0.1:8787"),
+            (
+                "ws://127.0.0.1:8787/ws".to_string(),
+                "http://127.0.0.1:8787/webhook".to_string(),
+            )
+        );
+    }
+
+    #[test]
+    fn normalizes_full_relay_urls_to_domain() {
+        assert_eq!(
+            normalize_relay_domain("wss://worker.example.workers.dev/ws".to_string()),
+            "worker.example.workers.dev"
+        );
+        assert_eq!(
+            normalize_relay_domain("https://worker.example.workers.dev/webhook".to_string()),
+            "worker.example.workers.dev"
+        );
+        assert_eq!(
+            normalize_relay_domain("personal-dashboard-relay.example.workers.dev/".to_string()),
+            "personal-dashboard-relay.example.workers.dev"
+        );
+    }
+
+    #[test]
+    fn recognizes_only_exact_local_hosts() {
+        assert!(is_local_relay_domain("localhost:8787"));
+        assert!(is_local_relay_domain("127.0.0.1:8787"));
+        assert!(is_local_relay_domain("[::1]:8787"));
+        assert!(!is_local_relay_domain("127.0.0.1.example.com"));
+        assert!(!is_local_relay_domain("personal-dashboard-relay.example.workers.dev"));
+    }
 }

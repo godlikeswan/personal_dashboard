@@ -19,7 +19,7 @@ Settings live in `dashboard-settings.txt` next to the executable. In the source 
    https://www.googleapis.com/auth/calendar.calendarlist.readonly
    ```
 
-Release builds receive the default client ID and secret from the GitHub Actions secrets `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` at compile time. They receive relay URLs derived from the deployed Worker instead of URL secrets. Local builds can use overrides in `dashboard-settings.txt`:
+Release builds receive the default client ID and secret from the GitHub Actions secrets `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` at compile time. They receive one relay domain derived from the deployed Worker and build the WebSocket and webhook URLs from it. Local builds can use overrides in `dashboard-settings.txt`:
 
 ```env
 GOOGLE_CLIENT_ID_OVERRIDE=your-client-id.apps.googleusercontent.com
@@ -50,13 +50,12 @@ The window opens fullscreen. On Windows, press `Alt+F4` to exit. Status messages
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `DASHBOARD_WS_URL` | `ws://127.0.0.1:8787/ws` locally, embedded at build time for releases | WebSocket signal hub |
+| `DASHBOARD_RELAY_DOMAIN` | `127.0.0.1:8787` locally, embedded at build time for releases | Relay host; client derives `wss://<domain>/ws` and `https://<domain>/webhook` |
 | `GOOGLE_CLIENT_ID_OVERRIDE` | value embedded at build time | OAuth Desktop app client ID |
 | `GOOGLE_CLIENT_SECRET_OVERRIDE` | value embedded at build time | OAuth client secret |
 | `GOOGLE_REFRESH_TOKEN` | written by sign-in | Long-lived token |
 | `GOOGLE_ACCESS_TOKEN` | written by sign-in | Short-lived token |
 | `GOOGLE_TOKEN_EXPIRES_AT` | written by sign-in | Unix timestamp for the access token |
-| `GOOGLE_WEBHOOK_URL` | `http://127.0.0.1:8787/webhook` locally, embedded at build time for releases | Webhook address registered with Google |
 | `GOOGLE_CHANNEL_ID*` | written by watch setup | Channel IDs for the main, Todo, and Important calendars |
 | `GOOGLE_CHANNEL_RESOURCE_ID*` | written by watch setup | Matching Google resource IDs |
 | `GOOGLE_CHANNEL_EXPIRATION*` | written by watch setup | Expiry timestamps for active watches |
@@ -66,6 +65,8 @@ The window opens fullscreen. On Windows, press `Alt+F4` to exit. Status messages
 | `WEATHER_LAT` | detected from IP | Latitude override |
 | `WEATHER_LON` | detected from IP | Longitude override |
 | `WEATHER_CITY` | detected from IP | Display name override |
+
+Local domains such as `localhost` and `127.0.0.1` derive `ws://` and `http://`; other domains derive `wss://` and `https://`.
 
 The watch suffixes are empty for the main calendar, `_TODO` for Todo, and `_IMPORTANT` for Important.
 

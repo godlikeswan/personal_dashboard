@@ -73,9 +73,10 @@ In Google Cloud:
    https://www.googleapis.com/auth/calendar.calendarlist.readonly
    ```
 
-Release builds get the default client ID, secret, and relay URLs at compile time. Create repository secrets named `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `CLOUDFLARE_API_TOKEN`, and `CLOUDFLARE_ACCOUNT_ID`; tagging a `v*` release deploys the relay, derives its URLs, and publishes `personal-dashboard.exe`. Local builds use override values in `dashboard-settings.txt` next to the client executable:
+Release builds get the default client ID, secret, and relay domain at compile time. Create repository secrets named `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `CLOUDFLARE_API_TOKEN`, and `CLOUDFLARE_ACCOUNT_ID`; tagging a `v*` release deploys the relay, derives its domain, and publishes `personal-dashboard.exe`. Local builds use override values in `dashboard-settings.txt` next to the client executable:
 
 ```env
+DASHBOARD_RELAY_DOMAIN=your-worker.your-subdomain.workers.dev
 GOOGLE_CLIENT_ID_OVERRIDE=your-client-id.apps.googleusercontent.com
 GOOGLE_CLIENT_SECRET_OVERRIDE=your-client-secret
 ```
@@ -94,14 +95,13 @@ npx wrangler login
 npm run deploy
 ```
 
-Wrangler prints your `workers.dev` URL. Release builds derive these URLs automatically from the Worker name and your Cloudflare account subdomain. For a local build, set them in `dashboard-settings.txt`:
+Wrangler prints your `workers.dev` URL. Release builds derive the relay domain automatically from the Worker name and your Cloudflare account subdomain. For a local build, set the domain in `dashboard-settings.txt`:
 
 ```env
-DASHBOARD_WS_URL=wss://your-worker.your-subdomain.workers.dev/ws
-GOOGLE_WEBHOOK_URL=https://your-worker.your-subdomain.workers.dev/webhook
+DASHBOARD_RELAY_DOMAIN=your-worker.your-subdomain.workers.dev
 ```
 
-Local development uses `ws://127.0.0.1:8787/ws` and `http://127.0.0.1:8787/webhook` by default.
+The client derives `wss://<domain>/ws` and `https://<domain>/webhook`. Local development uses `127.0.0.1:8787`, which derives `ws://127.0.0.1:8787/ws` and `http://127.0.0.1:8787/webhook`.
 
 See `tunnel/README.md` for more detail on the Worker endpoints and local testing.
 

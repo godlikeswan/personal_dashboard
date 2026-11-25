@@ -94,7 +94,7 @@ wss://personal-dashboard-relay.<your-subdomain>.workers.dev/ws
 https://personal-dashboard-relay.<your-subdomain>.workers.dev/webhook
 ```
 
-For release builds, CI derives both URLs from the Worker name in `wrangler.jsonc` and your Cloudflare account subdomain, verifies `/health`, and embeds them into the client build. Only `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` are needed as Cloudflare secrets.
+For release builds, CI derives the relay domain from the Worker name in `wrangler.jsonc` and your Cloudflare account subdomain, verifies `/health`, and embeds the domain into the client build. The client derives the `/ws` and `/webhook` URLs from that domain. Only `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` are needed as Cloudflare secrets.
 
 Watch logs:
 

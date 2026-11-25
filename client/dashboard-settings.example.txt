@@ -1,10 +1,9 @@
-DASHBOARD_WS_URL=wss://your-worker.your-subdomain.workers.dev/ws
+DASHBOARD_RELAY_DOMAIN=your-worker.your-subdomain.workers.dev
 GOOGLE_CLIENT_ID_OVERRIDE=
 GOOGLE_CLIENT_SECRET_OVERRIDE=
 GOOGLE_REFRESH_TOKEN=
 GOOGLE_ACCESS_TOKEN=
 GOOGLE_TOKEN_EXPIRES_AT=
-GOOGLE_WEBHOOK_URL=https://your-worker.your-subdomain.workers.dev/webhook
 GOOGLE_CHANNEL_CALENDAR=
 CALENDAR_ID=primary
 FALLBACK_SYNC_MINUTES=15
