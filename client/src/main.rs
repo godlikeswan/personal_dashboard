@@ -345,15 +345,22 @@ impl eframe::App for DashboardApp {
             .min(available_height * 0.65);
         let calendar_height = available_height - tasks_schedule_height;
         let half_width = screen.width() * 0.5;
+        let panel_padding = 10.0;
         let calendar_top = main_top + tasks_schedule_height + section_gap;
 
         let tasks_rect = egui::Rect::from_min_max(
-            egui::pos2(screen.min.x, main_top),
-            egui::pos2(screen.min.x + half_width, main_top + tasks_schedule_height),
+            egui::pos2(screen.min.x + panel_padding, main_top),
+            egui::pos2(
+                screen.min.x + half_width - panel_padding,
+                main_top + tasks_schedule_height,
+            ),
         );
         let schedule_rect = egui::Rect::from_min_max(
-            egui::pos2(screen.min.x + half_width, main_top),
-            egui::pos2(screen.max.x, main_top + tasks_schedule_height),
+            egui::pos2(screen.min.x + half_width + panel_padding, main_top),
+            egui::pos2(
+                screen.max.x - panel_padding,
+                main_top + tasks_schedule_height,
+            ),
         );
         let calendar_rect = egui::Rect::from_min_max(
             egui::pos2(screen.min.x, calendar_top),
@@ -394,11 +401,13 @@ impl eframe::App for DashboardApp {
 
         draw_five_day_timeline(ui, calendar_rect, now, &general, &number_by_index);
 
-        let status = format!(
-            "{}  |  {}  |  {}  |  {}",
-            self.status, self.fetch_status, self.watch_status, self.auth_status
-        );
-        draw_bottom_strip(ui, now, &important, &status);
+        let debug_status = cfg!(debug_assertions).then(|| {
+            format!(
+                "{}  |  {}  |  {}  |  {}",
+                self.status, self.fetch_status, self.watch_status, self.auth_status
+            )
+        });
+        draw_bottom_strip(ui, now, &important, debug_status.as_deref());
     }
 }
 
@@ -879,7 +888,7 @@ fn draw_bottom_strip(
     ui: &egui::Ui,
     now: DateTime<Local>,
     important: &[CalendarEvent],
-    status: &str,
+    status: Option<&str>,
 ) {
     let height = 112.0;
     let screen = ui.ctx().viewport_rect();
@@ -938,13 +947,15 @@ fn draw_bottom_strip(
         }
     }
 
-    painter.text(
-        egui::pos2(rect.min.x + 18.0, rect.max.y - 24.0),
-        egui::Align2::LEFT_TOP,
-        status,
-        egui::FontId::proportional(11.0),
-        weak_color,
-    );
+    if let Some(status) = status {
+        painter.text(
+            egui::pos2(rect.min.x + 18.0, rect.max.y - 24.0),
+            egui::Align2::LEFT_TOP,
+            status,
+            egui::FontId::proportional(11.0),
+            weak_color,
+        );
+    }
 }
 
 fn draw_five_day_timeline(
@@ -958,10 +969,9 @@ fn draw_five_day_timeline(
         return;
     }
 
-    let label_width = 8.0;
     let row_height = rect.height() / 5.0;
-    let plot_x = rect.min.x + label_width;
-    let plot_width = (rect.width() - label_width).max(1.0);
+    let plot_x = rect.min.x;
+    let plot_width = rect.width().max(1.0);
     let text_color = ui.visuals().text_color();
     let grid_stroke = egui::Stroke::new(0.5, ui.visuals().widgets.noninteractive.bg_stroke.color);
     let painter = ui.painter();
