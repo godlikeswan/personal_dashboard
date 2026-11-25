@@ -30,34 +30,34 @@ pub fn now() -> DateTime<Local> {
 
 pub fn todo_events(now: DateTime<Local>) -> Vec<CalendarEvent> {
     vec![
-        timed(now, 0, 7, 15, 15, "[x] Water plant"),
-        timed(now, 0, 9, 30, 20, "[ ] Buy milk"),
-        timed(now, 0, 12, 0, 15, "[ ] Eat sandwich"),
-        timed(now, 0, 16, 45, 10, "[ ] Find socks"),
-        timed(now, 0, 21, 0, 10, "[ ] Take nap"),
+        timed(now, 0, 7, 15, 15, "[x] Water cactus"),
+        timed(now, 0, 9, 30, 20, "[ ] Feed rubber duck"),
+        timed(now, 0, 12, 0, 15, "[ ] Count spoons"),
+        timed(now, 0, 16, 45, 10, "[ ] Wear hat"),
+        timed(now, 0, 21, 0, 10, "[ ] Pet rock"),
     ]
 }
 
 pub fn important_events(now: DateTime<Local>) -> Vec<CalendarEvent> {
     vec![
-        timed(now, 1, 12, 0, 60, "Weekend"),
-        timed(now, 4, 9, 0, 60, "Holiday"),
-        timed(now, 12, 18, 0, 120, "Birthday"),
-        timed(now, 35, 0, 0, 60, "New Year"),
+        timed(now, 1, 12, 0, 60, "Duck day"),
+        timed(now, 4, 9, 0, 60, "Sock day"),
+        timed(now, 12, 18, 0, 120, "Cactus day"),
+        timed(now, 35, 0, 0, 60, "Hat day"),
     ]
 }
 
 pub fn general_events(now: DateTime<Local>) -> Vec<CalendarEvent> {
     vec![
-        timed(now, 0, 8, 30, 30, "Drink coffee"),
-        timed(now, 0, 10, 30, 60, "Team meeting"),
-        timed(now, 0, 13, 0, 60, "Lunch"),
-        timed(now, 0, 13, 45, 30, "Quick call"),
-        timed(now, 1, 9, 0, 120, "Read book"),
-        timed(now, 1, 12, 0, 60, "Walk"),
-        all_day(now, 2, "Holiday"),
-        timed(now, 3, 18, 0, 120, "Watch TV"),
-        timed(now, 4, 11, 0, 60, "Sleep"),
+        timed(now, 0, 8, 30, 30, "Cactus party"),
+        timed(now, 0, 10, 30, 60, "Duck meeting"),
+        timed(now, 0, 13, 0, 60, "Spoon inspection"),
+        timed(now, 0, 13, 45, 30, "Hat review"),
+        timed(now, 1, 9, 0, 120, "Rock lecture"),
+        timed(now, 1, 12, 0, 60, "Sock walk"),
+        all_day(now, 2, "Sock holiday"),
+        timed(now, 3, 18, 0, 120, "Banana meeting"),
+        timed(now, 4, 11, 0, 60, "Chair convention"),
     ]
 }
 
