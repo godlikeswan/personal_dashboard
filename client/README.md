@@ -19,7 +19,7 @@ Settings live in `dashboard-settings.txt` next to the executable. In the source 
    https://www.googleapis.com/auth/calendar.calendarlist.readonly
    ```
 
-Release builds receive the default client ID and secret from the GitHub Actions secrets `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` at compile time. Local builds can use overrides in `dashboard-settings.txt`:
+Release builds receive the default client ID and secret from the GitHub Actions secrets `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` at compile time. They receive relay URLs derived from the deployed Worker instead of URL secrets. Local builds can use overrides in `dashboard-settings.txt`:
 
 ```env
 GOOGLE_CLIENT_ID_OVERRIDE=your-client-id.apps.googleusercontent.com

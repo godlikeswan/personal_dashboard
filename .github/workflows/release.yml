@@ -5,12 +5,83 @@ on:
     tags:
       - "v*"
 
-permissions:
-  contents: write
-
 jobs:
+  deploy-relay:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      base_url: ${{ steps['relay-url'].outputs.base_url }}
+      ws_url: ${{ steps['relay-url'].outputs.ws_url }}
+      webhook_url: ${{ steps['relay-url'].outputs.webhook_url }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: tunnel/package-lock.json
+
+      - name: Install relay dependencies
+        working-directory: tunnel
+        run: npm ci
+
+      - name: Deploy relay
+        working-directory: tunnel
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: npx wrangler deploy
+
+      - name: Derive relay URLs
+        id: relay-url
+        shell: bash
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          USER_AGENT="personal-dashboard-release-ci"
+
+          worker_name="$(jq -er '.name' tunnel/wrangler.jsonc)"
+          subdomain_response="$(curl -fsS \
+            -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+            -H "User-Agent: ${USER_AGENT}" \
+            "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/workers/subdomain")"
+          subdomain="$(printf '%s' "${subdomain_response}" | jq -er '.result.subdomain')"
+
+          base_url="https://${worker_name}.${subdomain}.workers.dev"
+          ws_url="wss://${worker_name}.${subdomain}.workers.dev/ws"
+          webhook_url="${base_url}/webhook"
+
+          curl -fsS \
+            --retry 5 \
+            --retry-delay 2 \
+            --retry-connrefused \
+            -H "User-Agent: ${USER_AGENT}" \
+            "${base_url}/health" \
+            | jq -e '.ok == true' >/dev/null
+
+          {
+            echo "base_url=${base_url}"
+            echo "ws_url=${ws_url}"
+            echo "webhook_url=${webhook_url}"
+          } >> "${GITHUB_OUTPUT}"
+
+          {
+            echo "### Relay URLs"
+            echo "- Base: ${base_url}"
+            echo "- WebSocket: ${ws_url}"
+            echo "- Webhook: ${webhook_url}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
   release:
+    needs: deploy-relay
     runs-on: windows-latest
+    permissions:
+      contents: write
 
     steps:
       - uses: actions/checkout@v4
@@ -22,8 +93,8 @@ jobs:
         env:
           GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
-          DASHBOARD_WS_URL: ${{ secrets.DASHBOARD_WS_URL }}
-          GOOGLE_WEBHOOK_URL: ${{ secrets.GOOGLE_WEBHOOK_URL }}
+          DASHBOARD_WS_URL: ${{ needs['deploy-relay'].outputs.ws_url }}
+          GOOGLE_WEBHOOK_URL: ${{ needs['deploy-relay'].outputs.webhook_url }}
         run: cargo build --release --manifest-path client/Cargo.toml
 
       - name: Stage executable

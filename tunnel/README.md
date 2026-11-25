@@ -67,7 +67,9 @@ Expected status: `200`.
 
 ## 4. Deploy
 
-Log in once:
+Tagging a `v*` release deploys this Worker automatically using the GitHub Actions secrets `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`.
+
+For a manual deploy, log in once:
 
 ```powershell
 npx wrangler login
@@ -92,7 +94,7 @@ wss://personal-dashboard-relay.<your-subdomain>.workers.dev/ws
 https://personal-dashboard-relay.<your-subdomain>.workers.dev/webhook
 ```
 
-For release builds, put those two URLs into the GitHub Actions secrets `DASHBOARD_WS_URL` and `GOOGLE_WEBHOOK_URL`.
+For release builds, CI derives both URLs from the Worker name in `wrangler.jsonc` and your Cloudflare account subdomain, verifies `/health`, and embeds them into the client build. Only `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` are needed as Cloudflare secrets.
 
 Watch logs:
 

@@ -73,7 +73,7 @@ In Google Cloud:
    https://www.googleapis.com/auth/calendar.calendarlist.readonly
    ```
 
-Release builds get the default client ID, secret, and relay URLs from GitHub Actions secrets at compile time. Create repository secrets named `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `DASHBOARD_WS_URL`, and `GOOGLE_WEBHOOK_URL`; tagging a `v*` release publishes `personal-dashboard.exe`. Local builds use override values in `dashboard-settings.txt` next to the client executable:
+Release builds get the default client ID, secret, and relay URLs at compile time. Create repository secrets named `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `CLOUDFLARE_API_TOKEN`, and `CLOUDFLARE_ACCOUNT_ID`; tagging a `v*` release deploys the relay, derives its URLs, and publishes `personal-dashboard.exe`. Local builds use override values in `dashboard-settings.txt` next to the client executable:
 
 ```env
 GOOGLE_CLIENT_ID_OVERRIDE=your-client-id.apps.googleusercontent.com
@@ -84,7 +84,9 @@ The refresh token, access token, expiry, and webhook channel IDs are written to 
 
 ### 2. Deploy the relay
 
-From `tunnel/`:
+Tagging a `v*` release deploys `tunnel/` automatically using the Cloudflare secrets above.
+
+For a manual deploy from `tunnel/`:
 
 ```powershell
 npm install
@@ -92,7 +94,7 @@ npx wrangler login
 npm run deploy
 ```
 
-Wrangler prints your `workers.dev` URL. Put it into the GitHub Actions secrets `DASHBOARD_WS_URL` and `GOOGLE_WEBHOOK_URL` for release builds, or set these in `dashboard-settings.txt` for a local build:
+Wrangler prints your `workers.dev` URL. Release builds derive these URLs automatically from the Worker name and your Cloudflare account subdomain. For a local build, set them in `dashboard-settings.txt`:
 
 ```env
 DASHBOARD_WS_URL=wss://your-worker.your-subdomain.workers.dev/ws
