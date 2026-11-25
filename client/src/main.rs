@@ -723,8 +723,9 @@ fn draw_task_row_at(
             box_rect.max.x - box_size * 0.16,
             box_rect.min.y + box_size * 0.22,
         );
-        painter.line_segment([a, b], stroke);
-        painter.line_segment([b, c], stroke);
+        let check_stroke = egui::Stroke::new(3.0, color);
+        painter.line_segment([a, b], check_stroke);
+        painter.line_segment([b, c], check_stroke);
     }
 
     painter.text(
