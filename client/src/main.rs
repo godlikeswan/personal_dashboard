@@ -18,7 +18,7 @@ use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio_tungstenite::tungstenite::Message;
 
-use calendar::CalendarEvent;
+use calendar::{CalendarEvent, EventColor};
 use tokens::TokenManager;
 use watch::WatchConfig;
 use weather::Weather;
@@ -1012,6 +1012,42 @@ fn draw_bottom_strip(
     }
 }
 
+fn rgba(rgb: [u8; 3], alpha: u8) -> egui::Color32 {
+    egui::Color32::from_rgba_premultiplied(rgb[0], rgb[1], rgb[2], alpha)
+}
+
+fn segment_fill(color: Option<EventColor>, all_day: bool) -> egui::Color32 {
+    let alpha = if all_day { 160 } else { 190 };
+    match color {
+        Some(color) => rgba(color.background, alpha),
+        None if all_day => rgba([70, 160, 150], alpha),
+        None => rgba([70, 120, 200], alpha),
+    }
+}
+
+fn segment_head_fill(color: Option<EventColor>) -> egui::Color32 {
+    match color {
+        Some(color) => {
+            let lighten = |channel: u8| ((u16::from(channel) * 3 + 255) / 4) as u8;
+            rgba(
+                [
+                    lighten(color.background[0]),
+                    lighten(color.background[1]),
+                    lighten(color.background[2]),
+                ],
+                220,
+            )
+        }
+        None => rgba([130, 180, 250], 220),
+    }
+}
+
+fn segment_number_color(color: Option<EventColor>) -> egui::Color32 {
+    color
+        .map(|color| rgba(color.foreground, 255))
+        .unwrap_or(egui::Color32::WHITE)
+}
+
 fn draw_five_day_timeline(
     ui: &mut egui::Ui,
     rect: egui::Rect,
@@ -1064,6 +1100,7 @@ fn draw_five_day_timeline(
         y: f32,
         height: f32,
         number: Option<usize>,
+        color: Option<EventColor>,
         all_day: bool,
         is_head: bool,
     }
@@ -1109,6 +1146,7 @@ fn draw_five_day_timeline(
                     y: 0.0,
                     height: 0.0,
                     number,
+                    color: event.color,
                     all_day: true,
                     is_head: segment_start == start,
                 });
@@ -1134,6 +1172,7 @@ fn draw_five_day_timeline(
                 y: 0.0,
                 height: 0.0,
                 number,
+                color: event.color,
                 all_day: false,
                 is_head: segment_start == start,
             });
@@ -1197,11 +1236,7 @@ fn draw_five_day_timeline(
     // Draw every bar first, then every number, so later events cannot paint over
     // an earlier event's number.
     for segment in &segments {
-        let fill = if segment.all_day {
-            egui::Color32::from_rgba_premultiplied(70, 160, 150, 160)
-        } else {
-            egui::Color32::from_rgba_premultiplied(70, 120, 200, 190)
-        };
+        let fill = segment_fill(segment.color, segment.all_day);
         painter.rect_filled(
             egui::Rect::from_min_max(
                 egui::pos2(segment.x0, segment.y),
@@ -1218,7 +1253,7 @@ fn draw_five_day_timeline(
                     egui::pos2(segment.x0 + 3.0, segment.y + segment.height),
                 ),
                 0.0,
-                egui::Color32::from_rgba_premultiplied(130, 180, 250, 220),
+                segment_head_fill(segment.color),
             );
         }
     }
@@ -1239,7 +1274,7 @@ fn draw_five_day_timeline(
             egui::Align2::CENTER_CENTER,
             number.to_string(),
             egui::FontId::proportional(font_size),
-            egui::Color32::WHITE,
+            segment_number_color(segment.color),
         );
     }
 
@@ -1546,6 +1581,7 @@ mod tests {
             all_day: false,
             starts_at: Some(start.clone()),
             ends_at: Some(end.clone()),
+            color: None,
         };
 
         assert_eq!(
@@ -1562,12 +1598,14 @@ mod tests {
             all_day: false,
             starts_at: Some(now + ChronoDuration::hours(1)),
             ends_at: Some(now + ChronoDuration::hours(2)),
+            color: None,
         };
         let second = CalendarEvent {
             summary: "Second".to_string(),
             all_day: false,
             starts_at: Some(now + ChronoDuration::hours(3)),
             ends_at: Some(now + ChronoDuration::hours(4)),
+            color: None,
         };
 
         let events = vec![second, first];
@@ -1601,6 +1639,7 @@ mod tests {
                     .earliest()
                     .expect("valid test time"),
             ),
+            color: None,
         };
 
         let (rows, numbers) = numbered_schedule(&[event], now);
@@ -1608,6 +1647,23 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].summary, "Morning");
         assert_eq!(numbers[0], Some(1));
+    }
+
+    #[test]
+    fn timeline_uses_event_colors() {
+        let color = EventColor {
+            background: [10, 20, 30],
+            foreground: [200, 210, 220],
+        };
+
+        assert_eq!(
+            segment_fill(Some(color), false),
+            egui::Color32::from_rgba_premultiplied(10, 20, 30, 190)
+        );
+        assert_eq!(
+            segment_number_color(Some(color)),
+            egui::Color32::from_rgb(200, 210, 220)
+        );
     }
 
     #[test]
