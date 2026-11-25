@@ -926,13 +926,7 @@ fn draw_bottom_strip(
     let y = rect.min.y + 16.0;
     let font = egui::FontId::proportional(22.0);
     for (days, summary) in countdowns {
-        let text = if days == 0 {
-            format!("{summary} — today")
-        } else if days == 1 {
-            format!("{summary} — tomorrow")
-        } else {
-            format!("{summary} — in {days} days")
-        };
+        let text = countdown_label(days, &summary);
 
         let used = painter.text(
             egui::pos2(x, y),
@@ -941,7 +935,7 @@ fn draw_bottom_strip(
             font.clone(),
             egui::Color32::WHITE,
         );
-        x = used.max.x + 28.0;
+        x = used.max.x + 48.0;
         if x > rect.max.x - 180.0 {
             break;
         }
@@ -1212,6 +1206,10 @@ fn draw_five_day_timeline(
 fn days_until(event: &CalendarEvent, now: DateTime<Local>) -> Option<i64> {
     let start = event.starts_at?;
     Some((start.date_naive() - now.date_naive()).num_days())
+}
+
+fn countdown_label(days: i64, summary: &str) -> String {
+    format!("{days}d  {summary}")
 }
 
 fn main() -> eframe::Result {
@@ -1536,5 +1534,12 @@ mod tests {
         assert_eq!(rows[1].summary, "Second");
         assert_eq!(numbers[0], Some(2));
         assert_eq!(numbers[1], Some(1));
+    }
+
+    #[test]
+    fn countdown_label_uses_numeric_days() {
+        assert_eq!(countdown_label(0, "Thanksgiving"), "0d  Thanksgiving");
+        assert_eq!(countdown_label(1, "New Year"), "1d  New Year");
+        assert_eq!(countdown_label(35, "New Year"), "35d  New Year");
     }
 }
