@@ -344,8 +344,22 @@ impl eframe::App for DashboardApp {
             .max(90.0)
             .min(available_height * 0.5);
         let calendar_height = available_height - tasks_schedule_height;
-
         let half_width = screen.width() * 0.5;
+        let calendar_top = main_top + tasks_schedule_height + section_gap;
+
+        let tasks_rect = egui::Rect::from_min_max(
+            egui::pos2(screen.min.x, main_top),
+            egui::pos2(screen.min.x + half_width, main_top + tasks_schedule_height),
+        );
+        let schedule_rect = egui::Rect::from_min_max(
+            egui::pos2(screen.min.x + half_width, main_top),
+            egui::pos2(screen.max.x, main_top + tasks_schedule_height),
+        );
+        let calendar_rect = egui::Rect::from_min_max(
+            egui::pos2(screen.min.x, calendar_top),
+            egui::pos2(screen.max.x, calendar_top + calendar_height),
+        );
+
         let tasks = visible_tasks(&todo, now);
         let task_font = task_font_size(ui, &tasks, half_width - 24.0);
         let task_row_height = task_font * 1.55;
@@ -358,59 +372,27 @@ impl eframe::App for DashboardApp {
             .floor() as usize;
         let (schedule_rows, number_by_index) = numbered_schedule(&general, now, schedule_capacity);
 
-        ui.columns(2, |columns| {
-            columns[0].allocate_ui_with_layout(
-                egui::vec2(columns[0].available_width(), tasks_schedule_height),
-                egui::Layout::top_down(egui::Align::LEFT),
-                |ui| {
-                    draw_task_panel(
-                        ui,
-                        ui.available_rect_before_wrap(),
-                        &tasks,
-                        task_font,
-                        task_row_height,
-                    );
-                },
-            );
-
-            columns[1].allocate_ui_with_layout(
-                egui::vec2(columns[1].available_width(), tasks_schedule_height),
-                egui::Layout::top_down(egui::Align::LEFT),
-                |ui| {
-                    draw_schedule_panel(
-                        ui,
-                        ui.available_rect_before_wrap(),
-                        &schedule_rows,
-                        schedule_font,
-                        schedule_row_height,
-                    );
-                },
-            );
-        });
+        draw_task_panel(ui, tasks_rect, &tasks, task_font, task_row_height);
+        draw_schedule_panel(
+            ui,
+            schedule_rect,
+            &schedule_rows,
+            schedule_font,
+            schedule_row_height,
+        );
 
         ui.painter().vline(
             screen.min.x + half_width,
-            egui::Rangef::new(main_top, main_top + tasks_schedule_height),
+            egui::Rangef::new(main_top, tasks_rect.max.y),
             ui.visuals().widgets.noninteractive.bg_stroke,
         );
-
-        ui.add_space(section_gap);
         ui.painter().hline(
             egui::Rangef::new(screen.min.x, screen.max.x),
-            main_top + tasks_schedule_height + section_gap * 0.5,
+            calendar_top - section_gap * 0.5,
             ui.visuals().widgets.noninteractive.bg_stroke,
         );
-        ui.add_space(section_gap * 0.5);
 
-        ui.allocate_ui_with_layout(
-            egui::vec2(screen.width(), calendar_height),
-            egui::Layout::top_down(egui::Align::LEFT),
-            |ui| {
-                draw_five_day_timeline(ui, now, &general, &number_by_index);
-            },
-        );
-
-        ui.add_space(8.0);
+        draw_five_day_timeline(ui, calendar_rect, now, &general, &number_by_index);
 
         let status = format!(
             "{}  |  {}  |  {}  |  {}",
@@ -967,11 +949,11 @@ fn draw_bottom_strip(
 
 fn draw_five_day_timeline(
     ui: &mut egui::Ui,
+    rect: egui::Rect,
     now: DateTime<Local>,
     events: &[CalendarEvent],
     number_by_index: &[Option<usize>],
 ) {
-    let rect = ui.available_rect_before_wrap();
     if rect.width() < 40.0 || rect.height() < 40.0 {
         return;
     }
