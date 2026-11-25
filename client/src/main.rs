@@ -1,0 +1,1271 @@
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+
+mod calendar;
+mod config;
+mod logging;
+mod oauth;
+mod tokens;
+mod watch;
+mod weather;
+
+use std::env;
+use std::time::Duration;
+
+use chrono::{DateTime, Duration as ChronoDuration, Local, Timelike, Utc};
+use eframe::egui;
+use futures_util::{SinkExt, StreamExt};
+use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
+use tokio_tungstenite::tungstenite::Message;
+
+use calendar::CalendarEvent;
+use tokens::TokenManager;
+use watch::WatchConfig;
+use weather::Weather;
+
+const WATCH_CHECK_SECONDS: u64 = 60 * 60;
+const WEATHER_CHECK_SECONDS: u64 = 15 * 60;
+
+enum AppEvent {
+    Status(String),
+    Message(String),
+    FetchStatus(String),
+    FetchError(String),
+    WatchStatus(String),
+    AuthStatus(String),
+    AuthFinished,
+    SignedIn,
+    RefreshAfterLogin,
+    TodoEvents(Vec<CalendarEvent>),
+    ImportantEvents(Vec<CalendarEvent>),
+    GeneralEvents(Vec<CalendarEvent>),
+    Weather(Weather),
+    WeatherError(String),
+}
+
+struct DashboardApp {
+    ctx: egui::Context,
+    tx: UnboundedSender<AppEvent>,
+    rx: UnboundedReceiver<AppEvent>,
+    status: String,
+    fetch_status: String,
+    watch_status: String,
+    auth_status: String,
+    signing_in: bool,
+    signed_in: bool,
+    latest_signal: String,
+    todo_events: Vec<CalendarEvent>,
+    important_events: Vec<CalendarEvent>,
+    general_events: Vec<CalendarEvent>,
+    weather: Option<Weather>,
+    weather_status: String,
+    tokens: TokenManager,
+    watch_configs: Vec<WatchConfig>,
+    // Kept alive so the spawned tasks keep running.
+    _runtime: tokio::runtime::Runtime,
+}
+
+impl DashboardApp {
+    fn new(ctx: egui::Context) -> Self {
+        let ws_url = config::dashboard_ws_url();
+        let fallback_minutes = env::var("FALLBACK_SYNC_MINUTES")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(15)
+            .max(1);
+        let tokens = TokenManager::from_env();
+        let has_refresh_token = config::env_nonempty("GOOGLE_REFRESH_TOKEN").is_some();
+        let has_client_id = config::google_client_id().is_some();
+
+        let (tx, rx) = mpsc::unbounded_channel();
+
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("failed to start tokio runtime");
+
+        let task_ctx = ctx.clone();
+        let ws_tx = tx.clone();
+        let task_url = ws_url.clone();
+        runtime.spawn(async move {
+            websocket_loop(task_ctx, ws_tx, task_url).await;
+        });
+
+        let fallback_ctx = ctx.clone();
+        let fallback_tx = tx.clone();
+        let fallback_tokens = tokens.clone();
+        runtime.spawn(async move {
+            fallback_loop(fallback_ctx, fallback_tx, fallback_tokens, fallback_minutes).await;
+        });
+
+        let weather_ctx = ctx.clone();
+        let weather_tx = tx.clone();
+        runtime.spawn(async move {
+            weather_loop(weather_ctx, weather_tx).await;
+        });
+
+        let watch_configs = [
+            ("primary", ""),
+            ("todo", "_TODO"),
+            ("important", "_IMPORTANT"),
+        ]
+        .into_iter()
+        .map(|(alias, suffix)| WatchConfig::for_calendar(alias, suffix))
+        .collect::<Vec<_>>();
+
+        for config_values in &watch_configs {
+            let watch_ctx = ctx.clone();
+            let watch_tx = tx.clone();
+            let watch_tokens = tokens.clone();
+            let watch_config = config_values.clone();
+            runtime.spawn(async move {
+                watch_loop(watch_ctx, watch_tx, watch_tokens, watch_config).await;
+            });
+        }
+
+        let signed_in = has_refresh_token;
+        let auto_login = !signed_in && has_client_id;
+
+        if auto_login {
+            spawn_login_task(&runtime, ctx.clone(), tx.clone(), tokens.clone());
+        } else if !has_refresh_token {
+            let _ = tx.send(AppEvent::AuthStatus(
+                "Set GOOGLE_CLIENT_ID_OVERRIDE in dashboard-settings.txt, then click Sign in".to_string(),
+            ));
+        }
+
+        let auth_status = if auto_login {
+            "Opening browser for Google sign-in...".to_string()
+        } else if signed_in {
+            "Google sign-in ready".to_string()
+        } else {
+            "Sign in required".to_string()
+        };
+
+        let app = Self {
+            ctx,
+            tx,
+            rx,
+            status: "Connecting...".to_string(),
+            fetch_status: "Loading calendars...".to_string(),
+            watch_status: "Checking webhook channels...".to_string(),
+            auth_status,
+            signing_in: auto_login,
+            signed_in,
+            latest_signal: "No signal yet".to_string(),
+            todo_events: Vec::new(),
+            important_events: Vec::new(),
+            general_events: Vec::new(),
+            weather: None,
+            weather_status: "Loading weather...".to_string(),
+            tokens,
+            watch_configs,
+            _runtime: runtime,
+        };
+
+        app.spawn_fetch_all();
+        app
+    }
+
+    fn spawn_fetch_all(&self) {
+        let ctx = self.ctx.clone();
+        let tx = self.tx.clone();
+        let tokens = self.tokens.clone();
+
+        send(&ctx, &tx, AppEvent::FetchStatus("Fetching calendars...".to_string()));
+
+        self._runtime.spawn(async move {
+            fetch_all_events(&ctx, &tx, &tokens).await;
+        });
+    }
+
+    fn spawn_login(&mut self) {
+        if self.signing_in {
+            return;
+        }
+
+        self.signing_in = true;
+        spawn_login_task(
+            &self._runtime,
+            self.ctx.clone(),
+            self.tx.clone(),
+            self.tokens.clone(),
+        );
+    }
+
+    fn spawn_watch_check_once(&self) {
+        for config_values in &self.watch_configs {
+            let ctx = self.ctx.clone();
+            let tx = self.tx.clone();
+            let tokens = self.tokens.clone();
+            let watch_config = config_values.clone();
+
+            self._runtime.spawn(async move {
+                match watch::ensure_channel(&tokens, &watch_config).await {
+                    Ok(status) => send(&ctx, &tx, AppEvent::WatchStatus(status)),
+                    Err(error) => send(
+                        &ctx,
+                        &tx,
+                        AppEvent::WatchStatus(format!("Watch error: {error}")),
+                    ),
+                }
+            });
+        }
+    }
+
+    fn drain_events(&mut self) {
+        while let Ok(event) = self.rx.try_recv() {
+            match event {
+                AppEvent::Status(status) => self.status = status,
+                AppEvent::Message(text) => self.record_message(text),
+                AppEvent::FetchStatus(status) => self.fetch_status = status,
+                AppEvent::FetchError(error) => self.fetch_status = error,
+                AppEvent::WatchStatus(status) => self.watch_status = status,
+                AppEvent::AuthStatus(status) => self.auth_status = status,
+                AppEvent::AuthFinished => self.signing_in = false,
+                AppEvent::SignedIn => self.signed_in = true,
+                AppEvent::RefreshAfterLogin => {
+                    self.spawn_fetch_all();
+                    self.spawn_watch_check_once();
+                }
+                AppEvent::TodoEvents(events) => self.todo_events = events,
+                AppEvent::ImportantEvents(events) => self.important_events = events,
+                AppEvent::GeneralEvents(events) => self.general_events = events,
+                AppEvent::Weather(weather) => self.weather = Some(weather),
+                AppEvent::WeatherError(error) => self.weather_status = error,
+            }
+        }
+    }
+
+    fn record_message(&mut self, text: String) {
+        let mut should_fetch = false;
+
+        let summary = match serde_json::from_str::<serde_json::Value>(&text) {
+            Ok(value) => {
+                let kind = value
+                    .get("type")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("unknown");
+                let state = value
+                    .get("state")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("-");
+
+                if kind == "calendar-changed" {
+                    let channel_id = value
+                        .get("channelId")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("");
+                    if known_channel_ids().iter().any(|known| known == channel_id) {
+                        should_fetch = true;
+                        format!("{kind} | state: {state}")
+                    } else {
+                        format!("{kind} | ignored (unknown channel)")
+                    }
+                } else {
+                    format!("{kind} | state: {state}")
+                }
+            }
+            Err(_) => text.clone(),
+        };
+
+        self.latest_signal = summary;
+
+        if should_fetch {
+            self.spawn_fetch_all();
+        }
+    }
+}
+
+fn known_channel_ids() -> Vec<String> {
+    [
+        "GOOGLE_CHANNEL_ID",
+        "GOOGLE_CHANNEL_ID_TODO",
+        "GOOGLE_CHANNEL_ID_IMPORTANT",
+    ]
+    .into_iter()
+    .filter_map(config::file_nonempty)
+    .collect()
+}
+
+impl eframe::App for DashboardApp {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.drain_events();
+        ui.ctx().request_repaint_after(Duration::from_secs(1));
+
+        let now = Local::now();
+        let todo = self.todo_events.clone();
+        let important = self.important_events.clone();
+        let general = self.general_events.clone();
+        let weather = self.weather.clone();
+        let weather_status = self.weather_status.clone();
+        let signing_in = self.signing_in;
+        let signed_in = self.signed_in;
+
+        // Top row: clock and date on the left, weather on the right.
+        ui.columns(2, |columns| {
+            draw_clock_date(&mut columns[0], now);
+
+            columns[1].with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
+                if let Some(current) = &weather {
+                    draw_weather_icon(ui, current.code, 64.0, &hover_text(current), 6.0);
+                    ui.label(
+                        egui::RichText::new(format!("{:.0}°C", current.temperature))
+                            .size(56.0)
+                            .strong()
+                            .color(egui::Color32::WHITE),
+                    );
+                } else {
+                    ui.label(weather_status.as_str());
+                }
+
+                if !signed_in && !signing_in && ui.button("Sign in").clicked() {
+                    self.spawn_login();
+                }
+            });
+        });
+
+        ui.add_space(8.0);
+        ui.separator();
+
+        // Anchor the bottom strip to the screen so countdowns are always visible.
+        let bottom_height = 112.0;
+        let screen = ui.ctx().viewport_rect();
+        let bottom_top = screen.max.y - bottom_height;
+        let main_top = ui.cursor().min.y;
+        let main_height = (bottom_top - main_top - 10.0).max(160.0);
+        let todo_width = screen.width() * 0.2;
+        let separator_x = screen.min.x + todo_width + 4.0;
+
+        ui.horizontal_top(|ui| {
+            ui.allocate_ui_with_layout(
+                egui::vec2(todo_width, main_height),
+                egui::Layout::top_down(egui::Align::LEFT),
+                |ui| {
+                    let tasks = visible_tasks(&todo, now);
+                    let font_size = task_font_size(ui, &tasks, todo_width - 22.0);
+
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                        if tasks.is_empty() {
+                            ui.label(
+                                egui::RichText::new("No tasks")
+                                    .size(font_size.min(18.0))
+                                    .color(egui::Color32::WHITE),
+                            );
+                        }
+
+                        for (checked, title) in tasks {
+                            draw_task_row(ui, checked, &title, font_size, todo_width - 22.0);
+                        }
+                    });
+                },
+            );
+
+            ui.add_space(8.0);
+
+            ui.allocate_ui_with_layout(
+                egui::vec2(ui.available_width(), main_height),
+                egui::Layout::top_down(egui::Align::LEFT),
+                |ui| {
+                    draw_five_day_timeline(ui, now, &general);
+                },
+            );
+        });
+
+        ui.painter().vline(
+            separator_x,
+            egui::Rangef::new(main_top, main_top + main_height),
+            ui.visuals().widgets.noninteractive.bg_stroke,
+        );
+
+        ui.add_space(8.0);
+
+        let status = format!(
+            "{}  |  {}  |  {}  |  {}",
+            self.status, self.fetch_status, self.watch_status, self.auth_status
+        );
+        draw_bottom_strip(ui, now, &important, &status);
+    }
+}
+
+fn visible_tasks(events: &[CalendarEvent], now: DateTime<Local>) -> Vec<(bool, String)> {
+    let window = ChronoDuration::hours(24);
+
+    events
+        .iter()
+        .filter_map(|event| {
+            let start = event.starts_at?;
+            let delta = start.signed_duration_since(now);
+            if delta < -window || delta > window {
+                return None;
+            }
+            Some(clean_task_title(&event.summary))
+        })
+        .collect()
+}
+
+fn clean_task_title(summary: &str) -> (bool, String) {
+    let raw = summary.trim();
+    let checked = raw.to_ascii_lowercase().starts_with("[x]");
+    let unchecked = raw.starts_with("[ ]");
+    let title = if checked || unchecked { &raw[3..] } else { raw };
+    (checked, title.trim_start().to_string())
+}
+
+fn task_font_size(ui: &egui::Ui, tasks: &[(bool, String)], max_width: f32) -> f32 {
+    if tasks.is_empty() {
+        return 18.0;
+    }
+
+    let reference_size = 12.0;
+    let reference_font = egui::FontId::proportional(reference_size);
+    let color = egui::Color32::WHITE;
+    let longest_title = ui.ctx().fonts_mut(|fonts| {
+        tasks
+            .iter()
+            .map(|(_, title)| {
+                fonts
+                    .layout_no_wrap(title.clone(), reference_font.clone(), color)
+                    .size()
+                    .x
+            })
+            .fold(0.0_f32, f32::max)
+    });
+
+    let checkbox_width = reference_size * 0.82 + 10.0;
+    let available = (max_width - checkbox_width).max(1.0);
+    (reference_size * available / longest_title.max(1.0)).clamp(18.0, 36.0)
+}
+
+fn draw_clock_date(ui: &mut egui::Ui, now: DateTime<Local>) {
+    let time_font = egui::FontId::proportional(56.0);
+    let date_font = egui::FontId::proportional(24.0);
+    let time = now.format("%H:%M:%S").to_string();
+    let date = now.format("%A, %B %d, %Y").to_string();
+    let color = egui::Color32::WHITE;
+
+    let (time_width, date_width, time_height) = ui.ctx().fonts_mut(|fonts| {
+        let time_width = fonts
+            .layout_no_wrap(time.clone(), time_font.clone(), color)
+            .size()
+            .x;
+        let date_width = fonts
+            .layout_no_wrap(date.clone(), date_font.clone(), color)
+            .size()
+            .x;
+        let time_height = fonts.row_height(&time_font);
+        (time_width, date_width, time_height)
+    });
+
+    let gap = 12.0;
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(time_width + gap + date_width, time_height),
+        egui::Sense::hover(),
+    );
+    let painter = ui.painter();
+
+    // Offset the smaller text so both strings sit on the same visual baseline.
+    let date_top_shift = (56.0 - 24.0) * 0.93;
+
+    painter.text(
+        egui::pos2(rect.min.x, rect.min.y),
+        egui::Align2::LEFT_TOP,
+        time,
+        time_font,
+        color,
+    );
+    painter.text(
+        egui::pos2(rect.min.x + time_width + gap, rect.min.y + date_top_shift),
+        egui::Align2::LEFT_TOP,
+        date,
+        date_font,
+        color,
+    );
+}
+
+fn hover_text(current: &Weather) -> String {
+    [
+        current.description.clone(),
+        current.city.clone().unwrap_or_else(|| "Local".to_string()),
+        current
+            .humidity
+            .map(|value| format!("{value}% humidity"))
+            .unwrap_or_default(),
+        current
+            .wind
+            .map(|value| format!("wind {value:.0} km/h"))
+            .unwrap_or_default(),
+    ]
+    .into_iter()
+    .filter(|value| !value.is_empty())
+    .collect::<Vec<_>>()
+    .join("  ·  ")
+}
+
+fn draw_task_row(ui: &mut egui::Ui, checked: bool, title: &str, font_size: f32, width: f32) {
+    let font_id = egui::FontId::proportional(font_size);
+    let color = egui::Color32::WHITE;
+    let box_size = font_size * 0.82;
+    let row_height = ui
+        .ctx()
+        .fonts_mut(|fonts| fonts.row_height(&font_id))
+        .max(box_size);
+
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(width, row_height + 6.0),
+        egui::Sense::hover(),
+    );
+    let center_y = rect.center().y;
+    let box_rect = egui::Rect::from_center_size(
+        egui::pos2(rect.min.x + box_size / 2.0, center_y),
+        egui::vec2(box_size, box_size),
+    )
+    .shrink(1.0);
+    let stroke = egui::Stroke::new(1.5, color);
+    let painter = ui.painter();
+
+    painter.rect_stroke(box_rect, 2.0, stroke, egui::StrokeKind::Inside);
+
+    if checked {
+        let a = egui::pos2(
+            box_rect.min.x + box_size * 0.20,
+            box_rect.min.y + box_size * 0.52,
+        );
+        let b = egui::pos2(
+            box_rect.min.x + box_size * 0.42,
+            box_rect.max.y - box_size * 0.18,
+        );
+        let c = egui::pos2(
+            box_rect.max.x - box_size * 0.16,
+            box_rect.min.y + box_size * 0.22,
+        );
+        painter.line_segment([a, b], stroke);
+        painter.line_segment([b, c], stroke);
+    }
+
+    painter.text(
+        egui::pos2(rect.min.x + box_size + 10.0, center_y),
+        egui::Align2::LEFT_CENTER,
+        title,
+        font_id,
+        color,
+    );
+}
+
+enum WeatherIcon {
+    Sun,
+    PartlyCloudy,
+    Cloud,
+    Fog,
+    Rain,
+    Snow,
+    Thunder,
+}
+
+fn weather_icon(code: u32) -> WeatherIcon {
+    match code {
+        0 => WeatherIcon::Sun,
+        1..=2 => WeatherIcon::PartlyCloudy,
+        3 => WeatherIcon::Cloud,
+        45 | 48 => WeatherIcon::Fog,
+        51..=67 | 80..=82 => WeatherIcon::Rain,
+        71..=77 | 85 | 86 => WeatherIcon::Snow,
+        95 => WeatherIcon::Thunder,
+        _ => WeatherIcon::Cloud,
+    }
+}
+
+fn draw_weather_icon(ui: &mut egui::Ui, code: u32, size: f32, hover: &str, y_offset: f32) {
+    let (allocated_rect, response) =
+        ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
+    response.on_hover_text(hover.to_string());
+
+    let rect = allocated_rect.translate(egui::vec2(0.0, y_offset));
+    let painter = ui.painter();
+    let center = rect.center();
+    let blue = egui::Color32::from_rgb(90, 160, 220);
+    let cloud = egui::Color32::from_rgb(180, 190, 200);
+
+    match weather_icon(code) {
+        WeatherIcon::Sun => draw_sun(painter, center, size * 0.30),
+        WeatherIcon::PartlyCloudy => {
+            draw_sun(
+                painter,
+                egui::pos2(rect.min.x + size * 0.32, rect.min.y + size * 0.32),
+                size * 0.20,
+            );
+            draw_cloud(
+                painter,
+                egui::pos2(rect.min.x + size * 0.62, rect.min.y + size * 0.62),
+                size * 0.72,
+                cloud,
+            );
+        }
+        WeatherIcon::Cloud => draw_cloud(painter, center, size * 0.88, cloud),
+        WeatherIcon::Fog => {
+            draw_cloud(
+                painter,
+                egui::pos2(center.x, center.y - size * 0.10),
+                size * 0.82,
+                cloud,
+            );
+            for offset in [0.22_f32, 0.34, 0.46] {
+                painter.hline(
+                    egui::Rangef::new(rect.min.x + size * 0.16, rect.max.x - size * 0.16),
+                    rect.min.y + size * offset,
+                    egui::Stroke::new(1.5, cloud),
+                );
+            }
+        }
+        WeatherIcon::Rain => {
+            draw_cloud(
+                painter,
+                egui::pos2(center.x, center.y - size * 0.14),
+                size * 0.82,
+                cloud,
+            );
+            for offset in [0.28_f32, 0.44] {
+                let x = rect.min.x + size * (0.32 + offset * 0.5);
+                painter.line_segment(
+                    [
+                        egui::pos2(x, rect.min.y + size * 0.56),
+                        egui::pos2(x - size * 0.06, rect.min.y + size * 0.72),
+                    ],
+                    egui::Stroke::new(2.0, blue),
+                );
+            }
+        }
+        WeatherIcon::Snow => {
+            draw_cloud(
+                painter,
+                egui::pos2(center.x, center.y - size * 0.14),
+                size * 0.82,
+                cloud,
+            );
+            for (x_factor, y_factor) in [(0.30_f32, 0.60_f32), (0.52, 0.70), (0.74, 0.58)] {
+                painter.circle_filled(
+                    egui::pos2(rect.min.x + size * x_factor, rect.min.y + size * y_factor),
+                    size * 0.035,
+                    egui::Color32::WHITE,
+                );
+            }
+        }
+        WeatherIcon::Thunder => {
+            draw_cloud(
+                painter,
+                egui::pos2(center.x, center.y - size * 0.16),
+                size * 0.82,
+                cloud,
+            );
+            let bolt = egui::Color32::from_rgb(255, 210, 80);
+            painter.line_segment(
+                [
+                    egui::pos2(rect.min.x + size * 0.52, rect.min.y + size * 0.48),
+                    egui::pos2(rect.min.x + size * 0.38, rect.min.y + size * 0.70),
+                ],
+                egui::Stroke::new(2.5, bolt),
+            );
+            painter.line_segment(
+                [
+                    egui::pos2(rect.min.x + size * 0.38, rect.min.y + size * 0.70),
+                    egui::pos2(rect.min.x + size * 0.52, rect.min.y + size * 0.70),
+                ],
+                egui::Stroke::new(2.5, bolt),
+            );
+            painter.line_segment(
+                [
+                    egui::pos2(rect.min.x + size * 0.52, rect.min.y + size * 0.70),
+                    egui::pos2(rect.min.x + size * 0.42, rect.min.y + size * 0.90),
+                ],
+                egui::Stroke::new(2.5, bolt),
+            );
+        }
+    }
+}
+
+fn draw_sun(painter: &egui::Painter, center: egui::Pos2, radius: f32) {
+    let color = egui::Color32::from_rgb(255, 205, 80);
+    painter.circle_filled(center, radius * 0.55, color);
+    for index in 0..8 {
+        let angle = index as f32 * std::f32::consts::PI / 4.0;
+        let from = center + egui::vec2(angle.cos(), angle.sin()) * radius * 0.75;
+        let to = center + egui::vec2(angle.cos(), angle.sin()) * radius * 1.25;
+        painter.line_segment([from, to], egui::Stroke::new(1.5, color));
+    }
+}
+
+fn draw_cloud(painter: &egui::Painter, center: egui::Pos2, width: f32, color: egui::Color32) {
+    let height = width * 0.45;
+    painter.circle_filled(
+        egui::pos2(center.x - width * 0.26, center.y + height * 0.04),
+        width * 0.22,
+        color,
+    );
+    painter.circle_filled(
+        egui::pos2(center.x, center.y - height * 0.12),
+        width * 0.28,
+        color,
+    );
+    painter.circle_filled(
+        egui::pos2(center.x + width * 0.26, center.y + height * 0.04),
+        width * 0.20,
+        color,
+    );
+    painter.rect_filled(
+        egui::Rect::from_center_size(
+            egui::pos2(center.x, center.y + height * 0.22),
+            egui::vec2(width * 0.88, height * 0.45),
+        ),
+        2.0,
+        color,
+    );
+}
+
+fn draw_bottom_strip(
+    ui: &egui::Ui,
+    now: DateTime<Local>,
+    important: &[CalendarEvent],
+    status: &str,
+) {
+    let height = 112.0;
+    let screen = ui.ctx().viewport_rect();
+    let rect = egui::Rect::from_min_max(
+        egui::pos2(screen.min.x, screen.max.y - height),
+        screen.max,
+    );
+    let painter = ui.painter();
+    let weak_color = ui.visuals().weak_text_color();
+
+    painter.hline(
+        egui::Rangef::new(rect.min.x, rect.max.x),
+        rect.min.y,
+        ui.visuals().widgets.noninteractive.bg_stroke,
+    );
+
+    let mut countdowns = important
+        .iter()
+        .filter_map(|event| {
+            let days = days_until(event, now)?;
+            Some((days, event.summary.clone()))
+        })
+        .collect::<Vec<_>>();
+    countdowns.sort_by_key(|(days, _)| *days);
+
+    if countdowns.is_empty() {
+        painter.text(
+            egui::pos2(rect.min.x + 18.0, rect.min.y + 16.0),
+            egui::Align2::LEFT_TOP,
+            "No important events",
+            egui::FontId::proportional(18.0),
+            weak_color,
+        );
+    }
+
+    let mut x = rect.min.x + 18.0;
+    let y = rect.min.y + 16.0;
+    let font = egui::FontId::proportional(22.0);
+    for (days, summary) in countdowns {
+        let text = if days == 0 {
+            format!("{summary} — today")
+        } else if days == 1 {
+            format!("{summary} — tomorrow")
+        } else {
+            format!("{summary} — in {days} days")
+        };
+
+        let used = painter.text(
+            egui::pos2(x, y),
+            egui::Align2::LEFT_TOP,
+            text,
+            font.clone(),
+            egui::Color32::WHITE,
+        );
+        x = used.max.x + 28.0;
+        if x > rect.max.x - 180.0 {
+            break;
+        }
+    }
+
+    painter.text(
+        egui::pos2(rect.min.x + 18.0, rect.max.y - 24.0),
+        egui::Align2::LEFT_TOP,
+        status,
+        egui::FontId::proportional(11.0),
+        weak_color,
+    );
+}
+
+fn draw_five_day_timeline(ui: &mut egui::Ui, now: DateTime<Local>, events: &[CalendarEvent]) {
+    let rect = ui.available_rect_before_wrap();
+    if rect.width() < 40.0 || rect.height() < 40.0 {
+        return;
+    }
+
+    let label_width = 8.0;
+    let row_height = rect.height() / 5.0;
+    let plot_x = rect.min.x + label_width;
+    let plot_width = (rect.width() - label_width).max(1.0);
+    let text_color = ui.visuals().text_color();
+    let weak_stroke = ui.visuals().widgets.noninteractive.bg_stroke;
+    let painter = ui.painter();
+
+    for index in 0..5 {
+        let y = rect.min.y + index as f32 * row_height;
+        painter.hline(
+            egui::Rangef::new(rect.min.x, rect.max.x),
+            y + row_height,
+            weak_stroke,
+        );
+    }
+
+    for hour in (0..=24).step_by(3) {
+        let x = plot_x + (hour as f32 / 24.0) * plot_width;
+        painter.vline(
+            x,
+            egui::Rangef::new(rect.min.y, rect.max.y),
+            weak_stroke,
+        );
+        painter.text(
+            egui::pos2(x + 2.0, rect.max.y - 14.0),
+            egui::Align2::LEFT_TOP,
+            format!("{hour:02}"),
+            egui::FontId::proportional(10.0),
+            text_color,
+        );
+    }
+
+    let now_seconds = now.hour() * 3600 + now.minute() * 60 + now.second();
+    let now_x = plot_x + (now_seconds as f32 / 86_400.0) * plot_width;
+    painter.vline(
+        now_x,
+        egui::Rangef::new(rect.min.y, rect.min.y + row_height),
+        egui::Stroke::new(1.5, egui::Color32::from_rgb(255, 90, 90)),
+    );
+
+    #[derive(Clone)]
+    struct Segment {
+        x0: f32,
+        x1: f32,
+        y: f32,
+        height: f32,
+        label: String,
+        all_day: bool,
+        is_head: bool,
+    }
+
+    let seconds_of_day = |time: DateTime<Local>| -> f32 {
+        (time.hour() * 3600 + time.minute() * 60 + time.second()) as f32
+    };
+
+    let mut segments = Vec::new();
+
+    for event in events {
+        let Some(start) = event.starts_at else {
+            continue;
+        };
+
+        let mut end = event.ends_at.unwrap_or(start + ChronoDuration::hours(1));
+        if end <= start {
+            end = start + ChronoDuration::minutes(15);
+        }
+
+        let first_day = (start.date_naive() - now.date_naive())
+            .num_days()
+            .max(0);
+        let last_day = ((end - ChronoDuration::nanoseconds(1)).date_naive() - now.date_naive())
+            .num_days()
+            .min(4);
+        if first_day > last_day {
+            continue;
+        }
+
+        for day_index in first_day..=last_day {
+            let day_date = now.date_naive() + ChronoDuration::days(day_index);
+            let Some(row_start) = day_date
+                .and_hms_opt(0, 0, 0)
+                .and_then(|naive| naive.and_local_timezone(Local).earliest())
+            else {
+                continue;
+            };
+            let row_end = row_start + ChronoDuration::days(1);
+            let segment_start = start.max(row_start);
+            let segment_end = end.min(row_end);
+            if segment_start >= segment_end {
+                continue;
+            }
+
+            let y = rect.min.y + day_index as f32 * row_height + 4.0;
+            let height = row_height - 8.0;
+
+            if event.all_day {
+                segments.push(Segment {
+                    x0: plot_x,
+                    x1: rect.max.x,
+                    y,
+                    height,
+                    label: format!("All day: {}", event.summary),
+                    all_day: true,
+                    is_head: segment_start == start,
+                });
+                continue;
+            }
+
+            let x0 = plot_x + (seconds_of_day(segment_start) / 86_400.0) * plot_width;
+            // An event that ends exactly at midnight has seconds_of_day == 0,
+            // so use the row's right edge instead of wrapping to x = plot_x.
+            let end_seconds = if segment_end == row_end {
+                86_400.0
+            } else {
+                seconds_of_day(segment_end)
+            };
+            let x1 = (plot_x + (end_seconds / 86_400.0) * plot_width)
+                .min(rect.max.x)
+                .max(x0 + 1.0);
+
+            let label = if segment_start > start {
+                format!("(cont.) {}", event.summary)
+            } else {
+                event.summary.clone()
+            };
+
+            segments.push(Segment {
+                x0,
+                x1,
+                y,
+                height,
+                label,
+                all_day: false,
+                is_head: segment_start == start,
+            });
+        }
+    }
+
+    // Draw every bar first, then every label, so later events cannot paint over
+    // an earlier event's name.
+    for segment in &segments {
+        let fill = if segment.all_day {
+            egui::Color32::from_rgba_premultiplied(70, 160, 150, 160)
+        } else {
+            egui::Color32::from_rgba_premultiplied(70, 120, 200, 190)
+        };
+        painter.rect_filled(
+            egui::Rect::from_min_max(
+                egui::pos2(segment.x0, segment.y),
+                egui::pos2(segment.x1, segment.y + segment.height),
+            ),
+            3.0,
+            fill,
+        );
+
+        if segment.is_head && !segment.all_day {
+            painter.rect_filled(
+                egui::Rect::from_min_max(
+                    egui::pos2(segment.x0, segment.y),
+                    egui::pos2(segment.x0 + 2.0, segment.y + segment.height),
+                ),
+                0.0,
+                egui::Color32::from_rgba_premultiplied(130, 180, 250, 220),
+            );
+        }
+    }
+
+    for segment in &segments {
+        // Right-anchor labels that finish near the end of the timeline so heads
+        // cutting across midnight stay inside the visible area.
+        let (pos, anchor) = if segment.x1 > rect.max.x - 160.0 {
+            (
+                egui::pos2(segment.x1 - 4.0, segment.y + 2.0),
+                egui::Align2::RIGHT_TOP,
+            )
+        } else {
+            (
+                egui::pos2(segment.x0 + 4.0, segment.y + 2.0),
+                egui::Align2::LEFT_TOP,
+            )
+        };
+
+        painter.text(
+            pos,
+            anchor,
+            segment.label.clone(),
+            egui::FontId::proportional(12.0),
+            egui::Color32::WHITE,
+        );
+    }
+
+    ui.allocate_rect(rect, egui::Sense::hover());
+}
+
+fn days_until(event: &CalendarEvent, now: DateTime<Local>) -> Option<i64> {
+    let start = event.starts_at?;
+    Some((start.date_naive() - now.date_naive()).num_days())
+}
+
+fn main() -> eframe::Result {
+    config::load_dotenv();
+    logging::log("Dashboard starting");
+
+    // Select exactly one Rustls crypto provider for HTTPS and WSS.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    let viewport = egui::ViewportBuilder::default()
+        .with_title("Personal Dashboard")
+        .with_decorations(false)
+        .with_fullscreen(true);
+
+    eframe::run_native(
+        "Personal Dashboard",
+        eframe::NativeOptions {
+            viewport,
+            ..Default::default()
+        },
+        Box::new(|cc| Ok(Box::new(DashboardApp::new(cc.egui_ctx.clone())))),
+    )
+}
+
+fn subscription_message() -> String {
+    let channel_ids = known_channel_ids();
+    serde_json::json!({
+        "type": "subscribe",
+        "channelIds": channel_ids,
+    })
+    .to_string()
+}
+
+async fn websocket_loop(ctx: egui::Context, tx: UnboundedSender<AppEvent>, url: String) {
+    loop {
+        send(&ctx, &tx, AppEvent::Status("Connecting...".to_string()));
+
+        match tokio_tungstenite::connect_async(url.as_str()).await {
+            Ok((mut socket, _response)) => {
+                send(&ctx, &tx, AppEvent::Status("Connected".to_string()));
+
+                if let Err(error) = socket
+                    .send(Message::Text(subscription_message().into()))
+                    .await
+                {
+                    send(
+                        &ctx,
+                        &tx,
+                        AppEvent::Status(format!("Subscribe failed: {error}")),
+                    );
+                    break;
+                }
+
+                let mut subscription_check = tokio::time::interval(Duration::from_secs(5));
+                subscription_check.set_missed_tick_behavior(
+                    tokio::time::MissedTickBehavior::Skip,
+                );
+
+                loop {
+                    tokio::select! {
+                        frame = socket.next() => match frame {
+                            Some(Ok(Message::Text(text))) => {
+                                send(&ctx, &tx, AppEvent::Message(text.to_string()));
+                            }
+                            Some(Ok(Message::Close(_))) | None => break,
+                            Some(Ok(_)) => {}
+                            Some(Err(error)) => {
+                                send(
+                                    &ctx,
+                                    &tx,
+                                    AppEvent::Status(format!("WebSocket error: {error}")),
+                                );
+                                break;
+                            }
+                        },
+                        _ = subscription_check.tick() => {
+                            // Re-send periodically so a socket that survived a
+                            // Worker redeploy also gets its subscriptions stored.
+                            if let Err(error) = socket
+                                .send(Message::Text(subscription_message().into()))
+                                .await
+                            {
+                                send(
+                                    &ctx,
+                                    &tx,
+                                    AppEvent::Status(format!("Subscribe failed: {error}")),
+                                );
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                send(&ctx, &tx, AppEvent::Status("Disconnected".to_string()));
+            }
+            Err(error) => {
+                send(
+                    &ctx,
+                    &tx,
+                    AppEvent::Status(format!("Connection failed: {error}")),
+                );
+            }
+        }
+
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
+}
+
+async fn fetch_all_events(ctx: &egui::Context, tx: &UnboundedSender<AppEvent>, tokens: &TokenManager) {
+    let now = Utc::now();
+
+    match calendar::fetch_events_in_range(
+        tokens,
+        "primary",
+        now,
+        now + ChronoDuration::days(5),
+        100,
+    )
+    .await
+    {
+        Ok(events) => {
+            logging::log(&format!("Loaded {} general events", events.len()));
+            send(ctx, tx, AppEvent::GeneralEvents(events));
+        }
+        Err(error) => send(ctx, tx, AppEvent::FetchError(format!("General: {error}"))),
+    }
+
+    match calendar::fetch_events_in_range(
+        tokens,
+        "todo",
+        now - ChronoDuration::hours(24),
+        now + ChronoDuration::hours(24),
+        100,
+    )
+    .await
+    {
+        Ok(events) => {
+            logging::log(&format!("Loaded {} todo events", events.len()));
+            send(ctx, tx, AppEvent::TodoEvents(events));
+        }
+        Err(error) => send(ctx, tx, AppEvent::FetchError(format!("Todo: {error}"))),
+    }
+
+    match calendar::fetch_events_in_range(
+        tokens,
+        "important",
+        now,
+        now + ChronoDuration::days(365),
+        100,
+    )
+    .await
+    {
+        Ok(events) => {
+            logging::log(&format!("Loaded {} important events", events.len()));
+            send(ctx, tx, AppEvent::ImportantEvents(events));
+        }
+        Err(error) => send(ctx, tx, AppEvent::FetchError(format!("Important: {error}"))),
+    }
+}
+
+async fn fallback_loop(
+    ctx: egui::Context,
+    tx: UnboundedSender<AppEvent>,
+    tokens: TokenManager,
+    minutes: u64,
+) {
+    loop {
+        tokio::time::sleep(Duration::from_secs(minutes * 60)).await;
+
+        send(
+            &ctx,
+            &tx,
+            AppEvent::FetchStatus("Fallback sync...".to_string()),
+        );
+
+        fetch_all_events(&ctx, &tx, &tokens).await;
+    }
+}
+
+async fn weather_loop(ctx: egui::Context, tx: UnboundedSender<AppEvent>) {
+    loop {
+        match weather::fetch_weather().await {
+            Ok(current) => send(&ctx, &tx, AppEvent::Weather(current)),
+            Err(error) => send(&ctx, &tx, AppEvent::WeatherError(error)),
+        }
+
+        tokio::time::sleep(Duration::from_secs(WEATHER_CHECK_SECONDS)).await;
+    }
+}
+
+async fn watch_loop(
+    ctx: egui::Context,
+    tx: UnboundedSender<AppEvent>,
+    tokens: TokenManager,
+    config_values: WatchConfig,
+) {
+    loop {
+        match watch::ensure_channel(&tokens, &config_values).await {
+            Ok(status) => send(&ctx, &tx, AppEvent::WatchStatus(status)),
+            Err(error) => {
+                send(&ctx, &tx, AppEvent::WatchStatus(format!("Watch error: {error}")))
+            }
+        }
+
+        tokio::time::sleep(Duration::from_secs(WATCH_CHECK_SECONDS)).await;
+    }
+}
+
+fn spawn_login_task(
+    runtime: &tokio::runtime::Runtime,
+    ctx: egui::Context,
+    tx: UnboundedSender<AppEvent>,
+    tokens: TokenManager,
+) {
+    let task_ctx = ctx.clone();
+    let task_tx = tx.clone();
+
+    runtime.spawn(async move {
+        send(
+            &task_ctx,
+            &task_tx,
+            AppEvent::AuthStatus("Opening browser for Google sign-in...".to_string()),
+        );
+
+        match oauth::login_async().await {
+            Ok(()) => {
+                tokens.reload_from_env().await;
+                send(
+                    &task_ctx,
+                    &task_tx,
+                    AppEvent::AuthStatus("Signed in with Google".to_string()),
+                );
+                send(&task_ctx, &task_tx, AppEvent::AuthFinished);
+                send(&task_ctx, &task_tx, AppEvent::SignedIn);
+                send(&task_ctx, &task_tx, AppEvent::RefreshAfterLogin);
+            }
+            Err(error) => {
+                send(
+                    &task_ctx,
+                    &task_tx,
+                    AppEvent::AuthStatus(format!("Sign-in failed: {error}")),
+                );
+                send(&task_ctx, &task_tx, AppEvent::AuthFinished);
+            }
+        }
+    });
+}
+
+fn send(ctx: &egui::Context, tx: &UnboundedSender<AppEvent>, event: AppEvent) {
+    match &event {
+        AppEvent::Status(text)
+        | AppEvent::FetchStatus(text)
+        | AppEvent::FetchError(text)
+        | AppEvent::WatchStatus(text)
+        | AppEvent::AuthStatus(text)
+        | AppEvent::WeatherError(text) => logging::log(text),
+        AppEvent::Message(text) => logging::log(&format!("signal: {text}")),
+        AppEvent::AuthFinished
+        | AppEvent::SignedIn
+        | AppEvent::RefreshAfterLogin
+        | AppEvent::TodoEvents(_)
+        | AppEvent::ImportantEvents(_)
+        | AppEvent::GeneralEvents(_)
+        | AppEvent::Weather(_) => {}
+    }
+
+    let _ = tx.send(event);
+    ctx.request_repaint();
+}

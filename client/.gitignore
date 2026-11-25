@@ -1,0 +1,4 @@
+/target/
+.env
+dashboard-settings.txt
+dashboard.log

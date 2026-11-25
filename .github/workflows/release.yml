@@ -1,0 +1,39 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build client
+        shell: pwsh
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          DASHBOARD_WS_URL: ${{ secrets.DASHBOARD_WS_URL }}
+          GOOGLE_WEBHOOK_URL: ${{ secrets.GOOGLE_WEBHOOK_URL }}
+        run: cargo build --release --manifest-path client/Cargo.toml
+
+      - name: Stage executable
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path release | Out-Null
+          Copy-Item client/target/release/personal-dashboard-client.exe release/personal-dashboard.exe
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/personal-dashboard.exe
+          generate_release_notes: true

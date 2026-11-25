@@ -1,0 +1,8 @@
+client_secret_*.json
+client/dashboard-settings.txt
+client/dashboard.log
+client/target/
+tunnel/node_modules/
+tunnel/.dev.vars
+tunnel/dist-dry-run/
+tunnel/.wrangler/
