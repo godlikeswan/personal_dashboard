@@ -4,8 +4,8 @@ A fullscreen dashboard for a TV or always-on display:
 
 - large clock and date
 - current weather
-- a `Todo` task list in the left fifth of the screen
-- a five-day calendar timeline
+- a `Todo` list and numbered upcoming events side by side
+- a full-width five-day calendar timeline whose event bars show those numbers
 - an `Important` countdown strip pinned to the bottom
 
 Google Calendar changes arrive through a Cloudflare Worker and update the display live.

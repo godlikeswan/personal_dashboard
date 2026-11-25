@@ -11,9 +11,6 @@ use crate::logging;
 pub struct Weather {
     pub temperature: f64,
     pub code: u32,
-    pub description: String,
-    pub humidity: Option<u32>,
-    pub wind: Option<f64>,
     pub city: Option<String>,
 }
 
@@ -30,7 +27,7 @@ pub async fn fetch_weather() -> Result<Weather, String> {
 
     let client = http_client()?;
     let url = format!(
-        "https://api.open-meteo.com/v1/forecast?latitude={latitude}&longitude={longitude}&current=temperature_2m,relative_humidity_2m,weather_code,wind_speed_10m&timezone=auto&forecast_days=1"
+        "https://api.open-meteo.com/v1/forecast?latitude={latitude}&longitude={longitude}&current=temperature_2m,weather_code&timezone=auto&forecast_days=1"
     );
 
     let response = client
@@ -58,9 +55,6 @@ pub async fn fetch_weather() -> Result<Weather, String> {
     Ok(Weather {
         temperature: current.temperature_2m,
         code: current.weather_code,
-        description: weather_description(current.weather_code),
-        humidity: current.relative_humidity_2m,
-        wind: current.wind_speed_10m,
         city: city.clone(),
     })
 }
@@ -202,22 +196,6 @@ fn snippet(text: &str, limit: usize) -> String {
     }
 }
 
-fn weather_description(code: u32) -> String {
-    match code {
-        0 => "Clear sky".to_string(),
-        1..=2 => "Mostly clear".to_string(),
-        3 => "Cloudy".to_string(),
-        45 | 48 => "Fog".to_string(),
-        51..=57 => "Drizzle".to_string(),
-        61..=67 => "Rain".to_string(),
-        71..=77 => "Snow".to_string(),
-        80..=82 => "Showers".to_string(),
-        85 | 86 => "Snow showers".to_string(),
-        95 => "Thunderstorm".to_string(),
-        _ => format!("Weather code {code}"),
-    }
-}
-
 #[derive(Deserialize)]
 struct WeatherResponse {
     current: CurrentWeather,
@@ -226,7 +204,5 @@ struct WeatherResponse {
 #[derive(Deserialize)]
 struct CurrentWeather {
     temperature_2m: f64,
-    relative_humidity_2m: Option<u32>,
     weather_code: u32,
-    wind_speed_10m: Option<f64>,
 }
