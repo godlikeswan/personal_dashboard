@@ -10,6 +10,8 @@ A fullscreen dashboard for a TV or always-on display:
 
 Google Calendar changes arrive through a Cloudflare Worker and update the display live.
 
+![Personal Dashboard screenshot](screenshot.png)
+
 ## Getting started
 
 1. Download the dashboard executable from the GitHub Releases page:
