@@ -25,6 +25,10 @@ use weather::Weather;
 
 const WATCH_CHECK_SECONDS: u64 = 60 * 60;
 const WEATHER_CHECK_SECONDS: u64 = 15 * 60;
+const CLOCK_FONT_SIZE: f32 = 56.0;
+const DATE_FONT_SIZE: f32 = 32.0;
+const SCHEDULE_ROW_FACTOR: f32 = 1.45;
+const BOTTOM_STRIP_HEIGHT: f32 = 92.0;
 
 enum AppEvent {
     Status(String),
@@ -374,16 +378,16 @@ impl eframe::App for DashboardApp {
         ui.separator();
 
         // Anchor the bottom strip to the screen so countdowns are always visible.
-        let bottom_height = 112.0;
+        let bottom_height = BOTTOM_STRIP_HEIGHT;
         let screen = ui.ctx().viewport_rect();
         let bottom_top = screen.max.y - bottom_height;
         let main_top = ui.cursor().min.y;
         let main_height = (bottom_top - main_top - 10.0).max(160.0);
         let section_gap = 12.0;
         let available_height = (main_height - section_gap).max(0.0);
-        let tasks_schedule_height = (available_height * 0.55)
+        let tasks_schedule_height = (available_height * 0.62)
             .max(90.0)
-            .min(available_height * 0.65);
+            .min(available_height * 0.72);
         let calendar_height = available_height - tasks_schedule_height;
         let half_width = screen.width() * 0.5;
         let panel_padding = 10.0;
@@ -419,7 +423,7 @@ impl eframe::App for DashboardApp {
             half_width - 24.0,
             tasks_schedule_height - 8.0,
         );
-        let schedule_row_height = schedule_font * 1.55;
+        let schedule_row_height = schedule_font * SCHEDULE_ROW_FACTOR;
 
         draw_task_panel(ui, tasks_rect, &tasks, task_font, task_row_height);
         draw_schedule_panel(
@@ -503,8 +507,8 @@ fn task_font_size(ui: &egui::Ui, tasks: &[(bool, String)], max_width: f32) -> f3
 }
 
 fn draw_clock_date(ui: &mut egui::Ui, now: DateTime<Local>) {
-    let time_font = egui::FontId::proportional(56.0);
-    let date_font = egui::FontId::proportional(24.0);
+    let time_font = egui::FontId::proportional(CLOCK_FONT_SIZE);
+    let date_font = egui::FontId::proportional(DATE_FONT_SIZE);
     let time = now.format("%H:%M:%S").to_string();
     let date = now.format("%A, %B %d, %Y").to_string();
     let color = egui::Color32::WHITE;
@@ -530,7 +534,7 @@ fn draw_clock_date(ui: &mut egui::Ui, now: DateTime<Local>) {
     let painter = ui.painter();
 
     // Offset the smaller text so both strings sit on the same visual baseline.
-    let date_top_shift = (56.0 - 24.0) * 0.93;
+    let date_top_shift = (CLOCK_FONT_SIZE - DATE_FONT_SIZE) * 0.93;
 
     painter.text(
         egui::pos2(rect.min.x, rect.min.y),
@@ -633,7 +637,7 @@ fn numbered_schedule(
 
 fn schedule_font_size(ui: &egui::Ui, rows: &[ScheduleRow], max_width: f32, max_height: f32) -> f32 {
     if rows.is_empty() {
-        return 18.0;
+        return 22.0;
     }
 
     let reference_size = 12.0;
@@ -652,9 +656,9 @@ fn schedule_font_size(ui: &egui::Ui, rows: &[ScheduleRow], max_width: f32, max_h
 
     let available_width = (max_width - 8.0).max(1.0);
     let width_font = reference_size * available_width / longest.max(1.0);
-    let height_font = (max_height / rows.len() as f32 / 1.55).max(0.0);
+    let height_font = (max_height / rows.len() as f32 / SCHEDULE_ROW_FACTOR).max(0.0);
 
-    width_font.min(height_font).clamp(8.0, 28.0)
+    width_font.min(height_font).clamp(10.0, 34.0)
 }
 
 fn draw_task_panel(
@@ -944,7 +948,7 @@ fn draw_bottom_strip(
     important: &[CalendarEvent],
     status: Option<&str>,
 ) {
-    let height = 112.0;
+    let height = BOTTOM_STRIP_HEIGHT;
     let screen = ui.ctx().viewport_rect();
     let rect =
         egui::Rect::from_min_max(egui::pos2(screen.min.x, screen.max.y - height), screen.max);
