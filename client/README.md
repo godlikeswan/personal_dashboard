@@ -89,7 +89,7 @@ FALLBACK_SYNC_MINUTES=15
 
 ## Demo data
 
-Set `DASHBOARD_DEMO=1` to fill the dashboard with mock tasks, events, weather, and countdowns. This is useful for screenshots and UI tests. The dashboard skips sign-in, calendar, relay, and weather requests in demo mode.
+Set `DASHBOARD_DEMO=1` to fill the dashboard with simple mock tasks, events, weather, and countdowns. This is useful for screenshots and UI tests. The dashboard skips sign-in, calendar, relay, and weather requests in demo mode.
 
 ```powershell
 $env:DASHBOARD_DEMO = '1'

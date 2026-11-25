@@ -53,6 +53,7 @@ struct DashboardApp {
     auth_status: String,
     signing_in: bool,
     signed_in: bool,
+    demo_mode: bool,
     latest_signal: String,
     todo_events: Vec<CalendarEvent>,
     important_events: Vec<CalendarEvent>,
@@ -95,6 +96,7 @@ impl DashboardApp {
         .collect::<Vec<_>>();
 
         if demo_mode {
+            let now = demo::now();
             logging::log("Demo mode enabled");
 
             return Self {
@@ -107,10 +109,11 @@ impl DashboardApp {
                 auth_status: "Demo data".to_string(),
                 signing_in: false,
                 signed_in: true,
+                demo_mode: true,
                 latest_signal: "Mock signal".to_string(),
-                todo_events: demo::todo_events(),
-                important_events: demo::important_events(),
-                general_events: demo::general_events(),
+                todo_events: demo::todo_events(now),
+                important_events: demo::important_events(now),
+                general_events: demo::general_events(now),
                 weather: Some(demo::weather()),
                 weather_status: "Demo weather".to_string(),
                 tokens,
@@ -179,6 +182,7 @@ impl DashboardApp {
             auth_status,
             signing_in: auto_login,
             signed_in,
+            demo_mode: false,
             latest_signal: "No signal yet".to_string(),
             todo_events: Vec::new(),
             important_events: Vec::new(),
@@ -324,7 +328,11 @@ impl eframe::App for DashboardApp {
         self.drain_events();
         ui.ctx().request_repaint_after(Duration::from_secs(1));
 
-        let now = Local::now();
+        let now = if self.demo_mode {
+            demo::now()
+        } else {
+            Local::now()
+        };
         let todo = self.todo_events.clone();
         let important = self.important_events.clone();
         let general = self.general_events.clone();

@@ -120,7 +120,7 @@ cargo run
 
 ### 4. Demo data for screenshots
 
-Set `DASHBOARD_DEMO=1` to show mock tasks, events, weather, and countdowns. Demo mode runs entirely offline, so it is handy for screenshots and UI checks.
+Set `DASHBOARD_DEMO=1` to show simple mock tasks, events, weather, and countdowns. Demo mode runs entirely offline, so it is handy for screenshots and UI checks.
 
 ```powershell
 $env:DASHBOARD_DEMO = '1'
