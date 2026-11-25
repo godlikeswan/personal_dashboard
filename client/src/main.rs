@@ -1298,7 +1298,8 @@ fn main() -> eframe::Result {
         config::config_dir().display()
     ));
     logging::log(&format!("Relay domain: {}", config::relay_domain()));
-    logging::log(&format!("Renderer: {:?}", eframe::Renderer::default()));
+    let renderer = eframe::Renderer::Glow;
+    logging::log(&format!("Renderer: {renderer:?}"));
 
     let default_panic_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -1318,6 +1319,7 @@ fn main() -> eframe::Result {
         "Personal Dashboard",
         eframe::NativeOptions {
             viewport,
+            renderer,
             ..Default::default()
         },
         Box::new(|cc| {
