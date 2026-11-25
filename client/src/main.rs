@@ -1298,6 +1298,10 @@ fn main() -> eframe::Result {
         config::config_dir().display()
     ));
     logging::log(&format!("Relay domain: {}", config::relay_domain()));
+    logging::log(&format!(
+        "Google client ID configured: {}",
+        config::google_client_id().is_some()
+    ));
     let renderer = eframe::Renderer::Glow;
     logging::log(&format!("Renderer: {renderer:?}"));
 
