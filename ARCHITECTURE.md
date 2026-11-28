@@ -21,15 +21,16 @@ The Worker relays signals. The client authenticates with Google, fetches events,
 
 ## Multi-user behavior
 
-Every client uses the same webhook URL, but each one generates its own random channel IDs when it registers watches with Google:
+Every client uses the same webhook URL, but each one generates its own random channel IDs when it registers watches with Google. The client discovers the calendars currently shown in the Google Calendar UI and creates one watch per visible calendar. Setting keys use a stable suffix derived from the calendar ID:
 
 ```text
-GOOGLE_CHANNEL_ID
-GOOGLE_CHANNEL_ID_TODO
-GOOGLE_CHANNEL_ID_IMPORTANT
+GOOGLE_CHANNEL_ID_<calendar-suffix>
+GOOGLE_CHANNEL_RESOURCE_ID_<calendar-suffix>
+GOOGLE_CHANNEL_EXPIRATION_<calendar-suffix>
+GOOGLE_CHANNEL_CALENDAR_<calendar-suffix>
 ```
 
-Those IDs are stored in that user's `dashboard-settings.txt`.
+Those IDs are stored in that user's `dashboard-settings.txt`. Channels for calendars that are no longer visible are stopped and removed.
 
 On WebSocket connect, the client sends:
 

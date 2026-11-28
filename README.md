@@ -30,13 +30,14 @@ Status messages and incoming signals go to `dashboard.log` next to the executabl
 
 ### Setting up your calendars
 
-The app finds calendars by name:
+The dashboard mirrors the calendars checked and shown in Google Calendar. Calendars you hide or uncheck there are ignored, and the app refreshes that visibility list automatically.
 
-| Calendar | What it is used for |
+| Visible calendar | What it is used for |
 |---|---|
 | Your main Google calendar (displayed as your account name; API alias `primary`) | The five-day timeline |
 | `Todo` | Tasks shown in the left column |
 | `Important` | Countdown events in the bottom strip |
+| Any other visible calendar | The five-day timeline |
 
 Create a Google Calendar named **Todo** for tasks. Only events within a rolling ±24-hour window are shown. Event titles beginning with `[ ]` or `[x]` are rendered as checkboxes; the prefix itself is hidden.
 

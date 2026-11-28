@@ -1,9 +1,10 @@
-use std::env;
+use std::collections::BTreeSet;
 
 use chrono::{Duration, Utc};
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::calendar::CalendarTarget;
 use crate::config;
 use crate::tokens::TokenManager;
 
@@ -12,26 +13,38 @@ const CHANNELS_STOP_URL: &str = "https://www.googleapis.com/calendar/v3/channels
 #[derive(Clone)]
 pub struct WatchConfig {
     pub webhook_url: String,
-    pub calendar_alias: String,
+    pub calendar_id: String,
+    pub calendar_summary: String,
     pub env_suffix: String,
 }
 
 impl WatchConfig {
-    pub fn for_calendar(calendar_alias: &str, env_suffix: &str) -> Self {
+    pub fn for_target(target: &CalendarTarget) -> Self {
         Self {
             webhook_url: config::google_webhook_url(),
-            calendar_alias: calendar_alias.to_string(),
-            env_suffix: env_suffix.to_string(),
+            calendar_id: target.id.clone(),
+            calendar_summary: target.summary.clone(),
+            env_suffix: target.env_suffix.clone(),
         }
     }
+}
+
+pub fn configured_channel_ids() -> Vec<String> {
+    config::channel_suffixes()
+        .into_iter()
+        .filter_map(|suffix| config::file_nonempty(&format!("GOOGLE_CHANNEL_ID{suffix}")))
+        .collect()
 }
 
 pub async fn ensure_channel(
     tokens: &TokenManager,
     config_values: &WatchConfig,
 ) -> Result<String, String> {
-    let calendar_id =
-        crate::calendar::resolve_calendar(tokens, &config_values.calendar_alias).await?;
+    let calendar_id = config_values.calendar_id.trim();
+    if calendar_id.is_empty() {
+        return Err("Calendar ID is empty".to_string());
+    }
+
     let access_token = tokens.access_token().await?;
 
     let id_key = format!("GOOGLE_CHANNEL_ID{}", config_values.env_suffix);
@@ -39,19 +52,19 @@ pub async fn ensure_channel(
     let expiration_key = format!("GOOGLE_CHANNEL_EXPIRATION{}", config_values.env_suffix);
     let calendar_key = format!("GOOGLE_CHANNEL_CALENDAR{}", config_values.env_suffix);
 
-    let channel_id = config::env_nonempty(&id_key);
-    let resource_id = config::env_nonempty(&resource_key);
-    let channel_calendar = config::env_nonempty(&calendar_key);
-    let expiration = env::var(&expiration_key)
-        .ok()
-        .and_then(|value| config::parse_expiry(&value));
+    let channel_id = config::file_nonempty(&id_key);
+    let resource_id = config::file_nonempty(&resource_key);
+    let channel_calendar = config::file_nonempty(&calendar_key);
+    let expiration =
+        config::file_nonempty(&expiration_key).and_then(|value| config::parse_expiry(&value));
 
     if let (Some(_), Some(_), Some(expiration)) = (&channel_id, &resource_id, expiration) {
-        if channel_calendar.as_deref() == Some(calendar_id.as_str())
+        if channel_calendar.as_deref() == Some(calendar_id)
             && expiration > Utc::now() + Duration::hours(24)
         {
             return Ok(format!(
-                "Webhook for '{calendar_id}' valid until {}",
+                "Webhook for '{}' valid until {}",
+                config_values.calendar_summary,
                 expiration.format("%Y-%m-%d %H:%M UTC")
             ));
         }
@@ -69,21 +82,23 @@ pub async fn ensure_channel(
     let new_channel_id = config::random_token(16);
     let response = create_watch(
         &access_token,
-        &calendar_id,
+        calendar_id,
         &new_channel_id,
         &config_values.webhook_url,
     )
     .await?;
 
-    let expiration = response
-        .expiration
-        .unwrap_or_else(|| (Utc::now() + Duration::days(6)).timestamp_millis().to_string());
+    let expiration = response.expiration.unwrap_or_else(|| {
+        (Utc::now() + Duration::days(6))
+            .timestamp_millis()
+            .to_string()
+    });
 
     config::update_env(&[
         (id_key.as_str(), response.id),
         (resource_key.as_str(), response.resource_id),
         (expiration_key.as_str(), expiration.clone()),
-        (calendar_key.as_str(), calendar_id.clone()),
+        (calendar_key.as_str(), calendar_id.to_string()),
     ])?;
 
     let readable = config::parse_expiry(&expiration)
@@ -91,8 +106,60 @@ pub async fn ensure_channel(
         .unwrap_or_else(|| expiration.clone());
 
     Ok(format!(
-        "Webhook for '{calendar_id}' renewed until {readable}{stop_note}"
+        "Webhook for '{}' ({calendar_id}) renewed until {readable}{stop_note}",
+        config_values.calendar_summary
     ))
+}
+
+pub async fn stop_stale_channels(
+    tokens: &TokenManager,
+    desired: &[WatchConfig],
+) -> Result<Vec<String>, String> {
+    let desired_suffixes = desired
+        .iter()
+        .map(|config_values| config_values.env_suffix.clone())
+        .collect::<BTreeSet<_>>();
+    let stale_suffixes = config::channel_suffixes()
+        .into_iter()
+        .filter(|suffix| !desired_suffixes.contains(suffix))
+        .collect::<Vec<_>>();
+
+    if stale_suffixes.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let access_token = tokens.access_token().await?;
+    let mut notes = Vec::new();
+
+    for suffix in stale_suffixes {
+        let id_key = format!("GOOGLE_CHANNEL_ID{suffix}");
+        let resource_key = format!("GOOGLE_CHANNEL_RESOURCE_ID{suffix}");
+        let expiration_key = format!("GOOGLE_CHANNEL_EXPIRATION{suffix}");
+        let calendar_key = format!("GOOGLE_CHANNEL_CALENDAR{suffix}");
+
+        let channel_id = config::file_nonempty(&id_key);
+        let resource_id = config::file_nonempty(&resource_key);
+        let calendar =
+            config::file_nonempty(&calendar_key).unwrap_or_else(|| "unknown calendar".to_string());
+
+        if let (Some(channel_id), Some(resource_id)) = (&channel_id, &resource_id) {
+            match stop_channel(&access_token, channel_id, resource_id).await {
+                Ok(()) => notes.push(format!("stopped stale watch for '{calendar}'")),
+                Err(error) => {
+                    notes.push(format!("stale watch stop failed for '{calendar}': {error}"))
+                }
+            }
+        }
+
+        config::remove_keys(&[
+            id_key.as_str(),
+            resource_key.as_str(),
+            expiration_key.as_str(),
+            calendar_key.as_str(),
+        ])?;
+    }
+
+    Ok(notes)
 }
 
 async fn create_watch(
@@ -102,9 +169,8 @@ async fn create_watch(
     webhook_url: &str,
 ) -> Result<WatchResponse, String> {
     let encoded_calendar = urlencoding::encode(calendar_id);
-    let url = format!(
-        "https://www.googleapis.com/calendar/v3/calendars/{encoded_calendar}/events/watch"
-    );
+    let url =
+        format!("https://www.googleapis.com/calendar/v3/calendars/{encoded_calendar}/events/watch");
 
     let body = json!({
         "id": channel_id,

@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -148,6 +149,66 @@ pub fn file_nonempty(key: &str) -> Option<String> {
     })
 }
 
+const CHANNEL_KEY_PREFIXES: [&str; 4] = [
+    "GOOGLE_CHANNEL_ID",
+    "GOOGLE_CHANNEL_RESOURCE_ID",
+    "GOOGLE_CHANNEL_EXPIRATION",
+    "GOOGLE_CHANNEL_CALENDAR",
+];
+
+pub fn channel_suffixes() -> Vec<String> {
+    let Ok(content) = fs::read_to_string(settings_path()) else {
+        return Vec::new();
+    };
+
+    let mut suffixes = BTreeSet::new();
+    for line in content.lines() {
+        let name = line
+            .split_once('=')
+            .map(|(name, _)| name.trim())
+            .unwrap_or_else(|| line.trim());
+        if name.starts_with('#') {
+            continue;
+        }
+
+        for prefix in CHANNEL_KEY_PREFIXES {
+            if let Some(suffix) = name.strip_prefix(prefix) {
+                suffixes.insert(suffix.to_string());
+            }
+        }
+    }
+
+    suffixes.into_iter().collect()
+}
+
+pub fn remove_keys(keys: &[&str]) -> Result<(), String> {
+    let path = settings_path();
+    if !path.exists() {
+        return Ok(());
+    }
+
+    let content = fs::read_to_string(&path)
+        .map_err(|error| format!("Failed to read dashboard-settings.txt: {error}"))?;
+    let lines = content
+        .lines()
+        .filter(|line| {
+            let name = line
+                .split_once('=')
+                .map(|(name, _)| name.trim())
+                .unwrap_or_else(|| line.trim());
+            !keys.iter().any(|key| name == *key)
+        })
+        .collect::<Vec<_>>();
+
+    let mut content = lines.join("\n");
+    if !content.is_empty() {
+        content.push('\n');
+    }
+
+    fs::write(&path, content)
+        .map_err(|error| format!("Failed to write dashboard-settings.txt: {error}"))
+}
+
 pub fn parse_expiry(value: &str) -> Option<DateTime<Utc>> {
     let value = value.trim();
 
@@ -192,7 +253,8 @@ pub fn update_env(updates: &[(&str, String)]) -> Result<(), String> {
     let mut content = lines.join("\n");
     content.push('\n');
 
-    fs::write(&path, content).map_err(|error| format!("Failed to write dashboard-settings.txt: {error}"))
+    fs::write(&path, content)
+        .map_err(|error| format!("Failed to write dashboard-settings.txt: {error}"))
 }
 
 pub fn random_token(byte_count: usize) -> String {
@@ -255,6 +317,8 @@ mod tests {
         assert!(is_local_relay_domain("127.0.0.1:8787"));
         assert!(is_local_relay_domain("[::1]:8787"));
         assert!(!is_local_relay_domain("127.0.0.1.example.com"));
-        assert!(!is_local_relay_domain("personal-dashboard-relay.example.workers.dev"));
+        assert!(!is_local_relay_domain(
+            "personal-dashboard-relay.example.workers.dev"
+        ));
     }
 }

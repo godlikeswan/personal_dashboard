@@ -10,6 +10,7 @@ mod watch;
 mod weather;
 
 use std::env;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use chrono::{DateTime, Duration as ChronoDuration, Local, Timelike, Utc};
@@ -18,7 +19,7 @@ use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio_tungstenite::tungstenite::Message;
 
-use calendar::{CalendarEvent, EventColor};
+use calendar::{CalendarEvent, CalendarRole, CalendarTarget, EventColor};
 use tokens::TokenManager;
 use watch::WatchConfig;
 use weather::Weather;
@@ -46,6 +47,7 @@ enum AppEvent {
     AuthFinished,
     SignedIn,
     RefreshAfterLogin,
+    CalendarsDiscovered(Vec<CalendarTarget>),
     TodoEvents(Vec<CalendarEvent>),
     ImportantEvents(Vec<CalendarEvent>),
     GeneralEvents(Vec<CalendarEvent>),
@@ -71,7 +73,8 @@ struct DashboardApp {
     weather: Option<Weather>,
     weather_status: String,
     tokens: TokenManager,
-    watch_configs: Vec<WatchConfig>,
+    calendar_targets: Vec<CalendarTarget>,
+    watch_configs: Arc<RwLock<Vec<WatchConfig>>>,
     // Kept alive so the spawned tasks keep running.
     _runtime: tokio::runtime::Runtime,
 }
@@ -96,14 +99,8 @@ impl DashboardApp {
             .build()
             .expect("failed to start tokio runtime");
 
-        let watch_configs = [
-            ("primary", ""),
-            ("todo", "_TODO"),
-            ("important", "_IMPORTANT"),
-        ]
-        .into_iter()
-        .map(|(alias, suffix)| WatchConfig::for_calendar(alias, suffix))
-        .collect::<Vec<_>>();
+        let watch_configs = Arc::new(RwLock::new(Vec::new()));
+        let calendar_targets = Vec::new();
 
         if demo_mode {
             let now = demo::now();
@@ -127,6 +124,7 @@ impl DashboardApp {
                 weather: Some(demo::weather()),
                 weather_status: "Demo weather".to_string(),
                 tokens,
+                calendar_targets,
                 watch_configs,
                 _runtime: runtime,
             };
@@ -139,11 +137,17 @@ impl DashboardApp {
             websocket_loop(task_ctx, ws_tx, task_url).await;
         });
 
-        let fallback_ctx = ctx.clone();
-        let fallback_tx = tx.clone();
-        let fallback_tokens = tokens.clone();
+        let discovery_ctx = ctx.clone();
+        let discovery_tx = tx.clone();
+        let discovery_tokens = tokens.clone();
         runtime.spawn(async move {
-            fallback_loop(fallback_ctx, fallback_tx, fallback_tokens, fallback_minutes).await;
+            discovery_loop(
+                discovery_ctx,
+                discovery_tx,
+                discovery_tokens,
+                fallback_minutes,
+            )
+            .await;
         });
 
         let weather_ctx = ctx.clone();
@@ -152,15 +156,13 @@ impl DashboardApp {
             weather_loop(weather_ctx, weather_tx).await;
         });
 
-        for config_values in &watch_configs {
-            let watch_ctx = ctx.clone();
-            let watch_tx = tx.clone();
-            let watch_tokens = tokens.clone();
-            let watch_config = config_values.clone();
-            runtime.spawn(async move {
-                watch_loop(watch_ctx, watch_tx, watch_tokens, watch_config).await;
-            });
-        }
+        let watch_ctx = ctx.clone();
+        let watch_tx = tx.clone();
+        let watch_tokens = tokens.clone();
+        let watch_configs_for_loop = watch_configs.clone();
+        runtime.spawn(async move {
+            watch_loop(watch_ctx, watch_tx, watch_tokens, watch_configs_for_loop).await;
+        });
 
         let signed_in = has_refresh_token;
         let auto_login = !signed_in && has_client_id;
@@ -200,18 +202,25 @@ impl DashboardApp {
             weather: None,
             weather_status: "Loading weather...".to_string(),
             tokens,
+            calendar_targets,
             watch_configs,
             _runtime: runtime,
         };
 
-        app.spawn_fetch_all();
+        app.spawn_discover_calendars();
         app
     }
 
     fn spawn_fetch_all(&self) {
+        if self.calendar_targets.is_empty() {
+            self.spawn_discover_calendars();
+            return;
+        }
+
         let ctx = self.ctx.clone();
         let tx = self.tx.clone();
         let tokens = self.tokens.clone();
+        let targets = self.calendar_targets.clone();
 
         send(
             &ctx,
@@ -220,7 +229,75 @@ impl DashboardApp {
         );
 
         self._runtime.spawn(async move {
-            fetch_all_events(&ctx, &tx, &tokens).await;
+            fetch_all_events(&ctx, &tx, &tokens, &targets).await;
+        });
+    }
+
+    fn spawn_discover_calendars(&self) {
+        let ctx = self.ctx.clone();
+        let tx = self.tx.clone();
+        let tokens = self.tokens.clone();
+
+        send(
+            &ctx,
+            &tx,
+            AppEvent::FetchStatus("Discovering calendars...".to_string()),
+        );
+
+        self._runtime.spawn(async move {
+            match calendar::visible_calendar_targets(&tokens).await {
+                Ok(targets) => send(&ctx, &tx, AppEvent::CalendarsDiscovered(targets)),
+                Err(error) => send(
+                    &ctx,
+                    &tx,
+                    AppEvent::FetchError(format!("Calendar list: {error}")),
+                ),
+            }
+        });
+    }
+
+    fn apply_calendar_targets(&mut self, targets: Vec<CalendarTarget>) {
+        let configs = targets
+            .iter()
+            .map(WatchConfig::for_target)
+            .collect::<Vec<_>>();
+
+        if let Ok(mut guard) = self.watch_configs.write() {
+            *guard = configs.clone();
+        }
+
+        self.calendar_targets = targets;
+        self.spawn_watch_check_once();
+        self.spawn_watch_cleanup(&configs);
+
+        if self.calendar_targets.is_empty() {
+            self.todo_events.clear();
+            self.important_events.clear();
+            self.general_events.clear();
+            self.fetch_status = "No visible calendars selected in Google Calendar".to_string();
+            return;
+        }
+
+        self.fetch_status = format!("{} visible calendars", self.calendar_targets.len());
+        self.spawn_fetch_all();
+    }
+
+    fn spawn_watch_cleanup(&self, configs: &[WatchConfig]) {
+        let ctx = self.ctx.clone();
+        let tx = self.tx.clone();
+        let tokens = self.tokens.clone();
+        let configs = configs.to_vec();
+
+        self._runtime.spawn(async move {
+            match watch::stop_stale_channels(&tokens, &configs).await {
+                Ok(notes) if notes.is_empty() => {}
+                Ok(notes) => send(&ctx, &tx, AppEvent::WatchStatus(notes.join("; "))),
+                Err(error) => send(
+                    &ctx,
+                    &tx,
+                    AppEvent::WatchStatus(format!("Watch cleanup error: {error}")),
+                ),
+            }
         });
     }
 
@@ -239,14 +316,18 @@ impl DashboardApp {
     }
 
     fn spawn_watch_check_once(&self) {
-        for config_values in &self.watch_configs {
+        let configs = match self.watch_configs.read() {
+            Ok(guard) => guard.clone(),
+            Err(_) => return,
+        };
+
+        for config_values in configs {
             let ctx = self.ctx.clone();
             let tx = self.tx.clone();
             let tokens = self.tokens.clone();
-            let watch_config = config_values.clone();
 
             self._runtime.spawn(async move {
-                match watch::ensure_channel(&tokens, &watch_config).await {
+                match watch::ensure_channel(&tokens, &config_values).await {
                     Ok(status) => send(&ctx, &tx, AppEvent::WatchStatus(status)),
                     Err(error) => send(
                         &ctx,
@@ -269,10 +350,8 @@ impl DashboardApp {
                 AppEvent::AuthStatus(status) => self.auth_status = status,
                 AppEvent::AuthFinished => self.signing_in = false,
                 AppEvent::SignedIn => self.signed_in = true,
-                AppEvent::RefreshAfterLogin => {
-                    self.spawn_fetch_all();
-                    self.spawn_watch_check_once();
-                }
+                AppEvent::RefreshAfterLogin => self.spawn_discover_calendars(),
+                AppEvent::CalendarsDiscovered(targets) => self.apply_calendar_targets(targets),
                 AppEvent::TodoEvents(events) => self.todo_events = events,
                 AppEvent::ImportantEvents(events) => self.important_events = events,
                 AppEvent::GeneralEvents(events) => self.general_events = events,
@@ -323,14 +402,7 @@ impl DashboardApp {
 }
 
 fn known_channel_ids() -> Vec<String> {
-    [
-        "GOOGLE_CHANNEL_ID",
-        "GOOGLE_CHANNEL_ID_TODO",
-        "GOOGLE_CHANNEL_ID_IMPORTANT",
-    ]
-    .into_iter()
-    .filter_map(config::file_nonempty)
-    .collect()
+    watch::configured_channel_ids()
 }
 
 impl eframe::App for DashboardApp {
@@ -1564,61 +1636,59 @@ async fn fetch_all_events(
     ctx: &egui::Context,
     tx: &UnboundedSender<AppEvent>,
     tokens: &TokenManager,
+    targets: &[CalendarTarget],
 ) {
     let local_now = Local::now();
     let now = local_now.to_utc();
     let today_start = fetch_window_start(local_now);
 
-    match calendar::fetch_events_in_range(
-        tokens,
-        "primary",
-        today_start,
-        now + ChronoDuration::days(5),
-        100,
-    )
-    .await
-    {
-        Ok(events) => {
-            logging::log(&format!("Loaded {} general events", events.len()));
-            send(ctx, tx, AppEvent::GeneralEvents(events));
+    let mut todo = Vec::new();
+    let mut important = Vec::new();
+    let mut general = Vec::new();
+    let mut errors = Vec::new();
+
+    for target in targets {
+        let (time_min, time_max, max_results) = match target.role {
+            CalendarRole::Todo => (
+                now - ChronoDuration::hours(24),
+                now + ChronoDuration::hours(24),
+                100,
+            ),
+            CalendarRole::Important => (today_start, now + ChronoDuration::days(365), 100),
+            CalendarRole::General => (today_start, now + ChronoDuration::days(5), 100),
+        };
+
+        match calendar::fetch_events_in_range(tokens, &target.id, time_min, time_max, max_results)
+            .await
+        {
+            Ok(events) => {
+                logging::log(&format!(
+                    "Loaded {} events from '{}' ({:?})",
+                    events.len(),
+                    target.summary,
+                    target.role
+                ));
+
+                match target.role {
+                    CalendarRole::Todo => todo.extend(events),
+                    CalendarRole::Important => important.extend(events),
+                    CalendarRole::General => general.extend(events),
+                }
+            }
+            Err(error) => errors.push(format!("{}: {error}", target.summary)),
         }
-        Err(error) => send(ctx, tx, AppEvent::FetchError(format!("General: {error}"))),
     }
 
-    match calendar::fetch_events_in_range(
-        tokens,
-        "todo",
-        now - ChronoDuration::hours(24),
-        now + ChronoDuration::hours(24),
-        100,
-    )
-    .await
-    {
-        Ok(events) => {
-            logging::log(&format!("Loaded {} todo events", events.len()));
-            send(ctx, tx, AppEvent::TodoEvents(events));
-        }
-        Err(error) => send(ctx, tx, AppEvent::FetchError(format!("Todo: {error}"))),
+    if !errors.is_empty() {
+        send(ctx, tx, AppEvent::FetchError(errors.join("; ")));
     }
 
-    match calendar::fetch_events_in_range(
-        tokens,
-        "important",
-        today_start,
-        now + ChronoDuration::days(365),
-        100,
-    )
-    .await
-    {
-        Ok(events) => {
-            logging::log(&format!("Loaded {} important events", events.len()));
-            send(ctx, tx, AppEvent::ImportantEvents(events));
-        }
-        Err(error) => send(ctx, tx, AppEvent::FetchError(format!("Important: {error}"))),
-    }
+    send(ctx, tx, AppEvent::TodoEvents(todo));
+    send(ctx, tx, AppEvent::ImportantEvents(important));
+    send(ctx, tx, AppEvent::GeneralEvents(general));
 }
 
-async fn fallback_loop(
+async fn discovery_loop(
     ctx: egui::Context,
     tx: UnboundedSender<AppEvent>,
     tokens: TokenManager,
@@ -1630,10 +1700,17 @@ async fn fallback_loop(
         send(
             &ctx,
             &tx,
-            AppEvent::FetchStatus("Fallback sync...".to_string()),
+            AppEvent::FetchStatus("Refreshing calendar list...".to_string()),
         );
 
-        fetch_all_events(&ctx, &tx, &tokens).await;
+        match calendar::visible_calendar_targets(&tokens).await {
+            Ok(targets) => send(&ctx, &tx, AppEvent::CalendarsDiscovered(targets)),
+            Err(error) => send(
+                &ctx,
+                &tx,
+                AppEvent::FetchError(format!("Calendar list: {error}")),
+            ),
+        }
     }
 }
 
@@ -1657,16 +1734,35 @@ async fn watch_loop(
     ctx: egui::Context,
     tx: UnboundedSender<AppEvent>,
     tokens: TokenManager,
-    config_values: WatchConfig,
+    watch_configs: Arc<RwLock<Vec<WatchConfig>>>,
 ) {
     loop {
-        match watch::ensure_channel(&tokens, &config_values).await {
-            Ok(status) => send(&ctx, &tx, AppEvent::WatchStatus(status)),
-            Err(error) => send(
-                &ctx,
-                &tx,
-                AppEvent::WatchStatus(format!("Watch error: {error}")),
-            ),
+        let configs = match watch_configs.read() {
+            Ok(guard) => guard.clone(),
+            Err(_) => Vec::new(),
+        };
+
+        if !configs.is_empty() {
+            for config_values in &configs {
+                match watch::ensure_channel(&tokens, config_values).await {
+                    Ok(status) => send(&ctx, &tx, AppEvent::WatchStatus(status)),
+                    Err(error) => send(
+                        &ctx,
+                        &tx,
+                        AppEvent::WatchStatus(format!("Watch error: {error}")),
+                    ),
+                }
+            }
+
+            match watch::stop_stale_channels(&tokens, &configs).await {
+                Ok(notes) if notes.is_empty() => {}
+                Ok(notes) => send(&ctx, &tx, AppEvent::WatchStatus(notes.join("; "))),
+                Err(error) => send(
+                    &ctx,
+                    &tx,
+                    AppEvent::WatchStatus(format!("Watch cleanup error: {error}")),
+                ),
+            }
         }
 
         tokio::time::sleep(Duration::from_secs(WATCH_CHECK_SECONDS)).await;
@@ -1725,6 +1821,7 @@ fn send(ctx: &egui::Context, tx: &UnboundedSender<AppEvent>, event: AppEvent) {
         AppEvent::AuthFinished
         | AppEvent::SignedIn
         | AppEvent::RefreshAfterLogin
+        | AppEvent::CalendarsDiscovered(_)
         | AppEvent::TodoEvents(_)
         | AppEvent::ImportantEvents(_)
         | AppEvent::GeneralEvents(_)

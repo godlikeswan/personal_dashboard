@@ -2,7 +2,7 @@
 
 Rust GUI client for the personal dashboard.
 
-The client connects to the Cloudflare Worker WebSocket hub, fetches Google Calendar events on startup and after each signal, refreshes access tokens automatically, keeps a background fallback refresh running, renews Calendar watch channels, and writes status and signal messages to `dashboard.log`.
+The client connects to the Cloudflare Worker WebSocket hub, discovers the calendars currently shown in Google Calendar, fetches their events on startup and after each signal, refreshes access tokens automatically, keeps a background fallback refresh running, renews one Calendar watch channel per visible calendar, and writes status and signal messages to `dashboard.log`.
 
 Settings live in `dashboard-settings.txt` next to the executable. In the source tree this file is `client/dashboard-settings.txt`; it is created on the first run.
 
@@ -57,11 +57,10 @@ The window opens fullscreen. On Windows, press `Alt+F4` to exit. Status messages
 | `GOOGLE_REFRESH_TOKEN` | written by sign-in | Long-lived token |
 | `GOOGLE_ACCESS_TOKEN` | written by sign-in | Short-lived token |
 | `GOOGLE_TOKEN_EXPIRES_AT` | written by sign-in | Unix timestamp for the access token |
-| `GOOGLE_CHANNEL_ID*` | written by watch setup | Channel IDs for the main, Todo, and Important calendars |
+| `GOOGLE_CHANNEL_ID*` | written by watch setup | Channel IDs for the currently visible calendars |
 | `GOOGLE_CHANNEL_RESOURCE_ID*` | written by watch setup | Matching Google resource IDs |
 | `GOOGLE_CHANNEL_EXPIRATION*` | written by watch setup | Expiry timestamps for active watches |
 | `GOOGLE_CHANNEL_CALENDAR*` | written by watch setup | Calendar each watch belongs to |
-| `CALENDAR_ID` | `primary` | Calendar to read and watch |
 | `FALLBACK_SYNC_MINUTES` | `15` | Background refresh interval |
 | `WEATHER_LAT` | detected from IP | Latitude override |
 | `WEATHER_LON` | detected from IP | Longitude override |
@@ -69,16 +68,16 @@ The window opens fullscreen. On Windows, press `Alt+F4` to exit. Status messages
 
 Local domains such as `localhost` and `127.0.0.1` derive `ws://` and `http://`; other domains derive `wss://` and `https://`.
 
-The watch suffixes are empty for the main calendar, `_TODO` for Todo, and `_IMPORTANT` for Important.
+Watch suffixes are derived from each calendar ID, so they stay stable across restarts. Channels for calendars that are no longer visible are stopped and removed from the settings file.
 
 ## Reliability behavior
 
 | Feature | Behavior |
 |---|---|
 | Access token | Refreshes 60 seconds before expiry and retries once on HTTP 401 |
-| Fallback sync | Refetches events every 15 minutes by default |
-| Webhook watch | Checked hourly and renewed when less than 24 hours remain |
-| Watch rotation | Stops the previous channel before creating a replacement |
+| Fallback sync | Rediscovers visible calendars and refetches their events every 15 minutes by default |
+| Webhook watch | One channel per visible calendar; checked hourly and renewed when less than 24 hours remain |
+| Watch rotation | Stops the previous channel before creating a replacement, and stops channels for calendars no longer visible |
 | Signal routing | Client subscribes its channel IDs over WSS; the Worker routes matching signals, and the client verifies them again |
 
 Set `FALLBACK_SYNC_MINUTES` to change the background refresh interval:
@@ -96,16 +95,14 @@ $env:DASHBOARD_DEMO = '1'
 cargo run
 ```
 
-## Calendar aliases
+## Calendar visibility
 
-`CALENDAR_ID` accepts aliases that are resolved through `calendarList.list`:
+The client reads `calendarList.list` with hidden calendars included, then uses Google's `selected` and `hidden` flags to keep only calendars shown in the Calendar UI. Each visible calendar is assigned a dashboard role from its name:
 
-| Alias | Calendar |
+| Calendar name | Role |
 |---|---|
-| `primary` | Your main Google calendar |
-| `todo` / `todos` | `Todo` |
-| `important` | `Important` |
-| `general` | Your main Google calendar |
-| `tasks` | `Tasks` |
+| `Todo`, `Todos`, `Tasks` | Tasks in the left column |
+| `Important` | Countdowns in the bottom strip |
+| Everything else, including `primary` | Five-day timeline |
 
-The resolved IDs are written to `dashboard.log`.
+Visible calendar IDs and roles are written to `dashboard.log`.

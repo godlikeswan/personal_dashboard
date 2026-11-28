@@ -9,13 +9,44 @@ use crate::tokens::TokenManager;
 
 const CALENDAR_LIST_URL: &str = "https://www.googleapis.com/calendar/v3/users/me/calendarList";
 const COLORS_URL: &str = "https://www.googleapis.com/calendar/v3/colors";
-static CALENDAR_LIST: OnceCell<Vec<CalendarListItem>> = OnceCell::const_new();
 static EVENT_COLORS: OnceCell<HashMap<String, EventColor>> = OnceCell::const_new();
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EventColor {
     pub background: [u8; 3],
     pub foreground: [u8; 3],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CalendarRole {
+    Todo,
+    Important,
+    General,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CalendarTarget {
+    pub id: String,
+    pub summary: String,
+    pub role: CalendarRole,
+    pub env_suffix: String,
+}
+
+impl CalendarTarget {
+    fn from_item(item: CalendarListItem) -> Self {
+        let id = item.id;
+        let summary = item
+            .summary
+            .filter(|summary| !summary.trim().is_empty())
+            .unwrap_or_else(|| id.clone());
+
+        Self {
+            env_suffix: stable_env_suffix(&id),
+            role: role_for_summary(&summary),
+            id,
+            summary,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -41,73 +72,75 @@ impl From<FetchError> for String {
     }
 }
 
-// Lets the app use names like "todo" and "important" instead of raw IDs.
-pub async fn resolve_calendar(tokens: &TokenManager, requested: &str) -> Result<String, String> {
-    let raw = requested.trim();
+fn role_for_summary(summary: &str) -> CalendarRole {
+    let compact = summary
+        .trim()
+        .to_ascii_lowercase()
+        .chars()
+        .filter(|character| !matches!(character, ' ' | '-' | '_'))
+        .collect::<String>();
 
-    if raw.is_empty() || raw.eq_ignore_ascii_case("primary") {
-        return Ok("primary".to_string());
-    }
-
-    let wanted = match raw.to_ascii_lowercase().as_str() {
-        "tasks" => "tasks",
-        "todo" | "todos" => "todo",
-        "important" => "important",
-        "general" => "general",
-        _ => return Ok(raw.to_string()),
-    };
-
-    let items = calendar_items(tokens).await?;
-
-    let exact = items.iter().find(|item| {
-        item.summary
-            .as_deref()
-            .is_some_and(|summary| summary.trim().eq_ignore_ascii_case(wanted))
-    });
-    let partial = items.iter().find(|item| {
-        item.summary
-            .as_deref()
-            .is_some_and(|summary| summary.to_ascii_lowercase().contains(wanted))
-    });
-
-    match exact.or(partial) {
-        Some(item) => {
-            logging::log(&format!("Resolved calendar '{wanted}' to {}", item.id));
-            Ok(item.id.clone())
-        }
-        None if wanted == "general" => Ok("primary".to_string()),
-        None => {
-            let available = items
-                .iter()
-                .map(|item| format!("{} ({})", item.summary.as_deref().unwrap_or("?"), item.id))
-                .collect::<Vec<_>>()
-                .join(", ");
-            Err(format!(
-                "No '{wanted}' calendar found. Available calendars: {available}"
-            ))
-        }
+    if compact.contains("important") {
+        CalendarRole::Important
+    } else if compact.contains("todo") || compact.contains("tasks") || compact == "task" {
+        CalendarRole::Todo
+    } else {
+        CalendarRole::General
     }
 }
 
-async fn calendar_items(tokens: &TokenManager) -> Result<&'static Vec<CalendarListItem>, String> {
-    CALENDAR_LIST
-        .get_or_try_init(|| async {
-            let token = tokens.access_token().await?;
+fn stable_env_suffix(calendar_id: &str) -> String {
+    // FNV-1a keeps watch settings keys stable across restarts without exposing
+    // raw calendar IDs in the settings file.
+    let mut hash = 0xcbf29ce484222325_u64;
+    for &byte in calendar_id.as_bytes() {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
 
-            match list_calendars_once(&token).await {
-                Ok(items) => Ok(items),
-                Err(FetchError::Unauthorized) => {
-                    let refreshed = tokens.force_refresh().await?;
-                    list_calendars_once(&refreshed).await.map_err(Into::into)
-                }
-                Err(error) => Err(error.into()),
-            }
-        })
-        .await
+    format!("_C{hash:016X}")
+}
+
+pub async fn visible_calendar_targets(
+    tokens: &TokenManager,
+) -> Result<Vec<CalendarTarget>, String> {
+    let items = list_calendars(tokens).await?;
+    let targets = items
+        .into_iter()
+        .filter(CalendarListItem::visible)
+        .map(CalendarTarget::from_item)
+        .collect::<Vec<_>>();
+
+    logging::log(&format!(
+        "Discovered {} visible Google calendars",
+        targets.len()
+    ));
+    for target in &targets {
+        logging::log(&format!(
+            "Watching '{}' ({}) as {:?}",
+            target.summary, target.id, target.role
+        ));
+    }
+
+    Ok(targets)
+}
+
+async fn list_calendars(tokens: &TokenManager) -> Result<Vec<CalendarListItem>, String> {
+    let token = tokens.access_token().await?;
+
+    match list_calendars_once(&token).await {
+        Ok(items) => Ok(items),
+        Err(FetchError::Unauthorized) => {
+            let refreshed = tokens.force_refresh().await?;
+            list_calendars_once(&refreshed).await.map_err(Into::into)
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 async fn list_calendars_once(token: &str) -> Result<Vec<CalendarListItem>, FetchError> {
-    let body = api_get(token, CALENDAR_LIST_URL, &[]).await?;
+    let params = [("showHidden", "true")];
+    let body = api_get(token, CALENDAR_LIST_URL, &params).await?;
     let parsed: CalendarListResponse = serde_json::from_str(&body)
         .map_err(|error| FetchError::Other(format!("Calendar list parse failed: {error}")))?;
     Ok(parsed.items)
@@ -171,7 +204,11 @@ pub async fn fetch_events_in_range(
     time_max: DateTime<Utc>,
     max_results: usize,
 ) -> Result<Vec<CalendarEvent>, String> {
-    let calendar_id = resolve_calendar(tokens, calendar_id).await?;
+    let calendar_id = calendar_id.trim();
+    if calendar_id.is_empty() {
+        return Err("Calendar ID is empty".to_string());
+    }
+
     let token = tokens.access_token().await?;
     let colors = match event_colors(tokens).await {
         Ok(colors) => colors,
@@ -192,11 +229,11 @@ pub async fn fetch_events_in_range(
         ("timeMax", max.as_str()),
     ];
 
-    match fetch_once(&token, &calendar_id, &params, &colors).await {
+    match fetch_once(&token, calendar_id, &params, &colors).await {
         Ok(events) => Ok(events),
         Err(FetchError::Unauthorized) => {
             let refreshed = tokens.force_refresh().await?;
-            match fetch_once(&refreshed, &calendar_id, &params, &colors).await {
+            match fetch_once(&refreshed, calendar_id, &params, &colors).await {
                 Ok(events) => Ok(events),
                 Err(error) => Err(error.into()),
             }
@@ -351,6 +388,18 @@ struct CalendarListResponse {
 struct CalendarListItem {
     id: String,
     summary: Option<String>,
+    #[serde(default)]
+    selected: Option<bool>,
+    #[serde(default)]
+    hidden: bool,
+    #[serde(default)]
+    deleted: bool,
+}
+
+impl CalendarListItem {
+    fn visible(&self) -> bool {
+        self.selected == Some(true) && !self.hidden && !self.deleted
+    }
 }
 
 #[cfg(test)]
@@ -369,5 +418,56 @@ mod tests {
         assert_eq!(parse_hex_color("#abc"), None);
         assert_eq!(parse_hex_color("#gg0011"), None);
         assert_eq!(parse_hex_color(""), None);
+    }
+
+    #[test]
+    fn visibility_follows_google_calendar_flags() {
+        let response: CalendarListResponse = serde_json::from_str(
+            r#"{
+                "items": [
+                    {"id": "primary", "summary": "Me", "selected": true},
+                    {"id": "todo", "summary": "Todo", "selected": true, "hidden": true},
+                    {"id": "important", "summary": "Important", "selected": false},
+                    {"id": "old", "summary": "Old", "selected": true, "deleted": true},
+                    {"id": "work", "summary": "Work", "selected": true}
+                ]
+            }"#,
+        )
+        .expect("valid calendar list");
+
+        let visible = response
+            .items
+            .into_iter()
+            .filter(CalendarListItem::visible)
+            .map(|item| item.id)
+            .collect::<Vec<_>>();
+
+        assert_eq!(visible, ["primary", "work"]);
+    }
+
+    #[test]
+    fn summary_maps_to_dashboard_role() {
+        assert_eq!(role_for_summary("Todo"), CalendarRole::Todo);
+        assert_eq!(role_for_summary("to-do list"), CalendarRole::Todo);
+        assert_eq!(role_for_summary("Weekly Tasks"), CalendarRole::Todo);
+        assert_eq!(role_for_summary("Important"), CalendarRole::Important);
+        assert_eq!(role_for_summary("Important tasks"), CalendarRole::Important);
+        assert_eq!(role_for_summary("ily@example.com"), CalendarRole::General);
+    }
+
+    #[test]
+    fn watch_suffix_is_stable_and_calendar_specific() {
+        let first = stable_env_suffix("ily@example.com");
+        let again = stable_env_suffix("ily@example.com");
+        let other = stable_env_suffix("other@example.com");
+
+        assert_eq!(first, again);
+        assert_ne!(first, other);
+        assert!(first.starts_with("_C"));
+        assert!(
+            first[1..]
+                .chars()
+                .all(|character| character.is_ascii_hexdigit())
+        );
     }
 }
