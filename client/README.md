@@ -2,7 +2,7 @@
 
 Rust GUI client for the personal dashboard.
 
-The client connects to the Cloudflare Worker WebSocket hub, discovers the calendars currently shown in Google Calendar, fetches their events on startup and after each signal, refreshes access tokens automatically, keeps a background fallback refresh running, renews one Calendar watch channel per visible calendar, and writes status and signal messages to `dashboard.log`.
+The client connects to the Cloudflare Worker WebSocket hub, discovers the calendars currently shown in Google Calendar, fetches their events on startup and after each signal, refreshes access tokens automatically, keeps a background fallback refresh running, renews one CalendarList watch plus one event watch per visible calendar, and writes status and signal messages to `dashboard.log`.
 
 Settings live in `dashboard-settings.txt` next to the executable. In the source tree this file is `client/dashboard-settings.txt`; it is created on the first run.
 
@@ -68,7 +68,7 @@ The window opens fullscreen. On Windows, press `Alt+F4` to exit. Status messages
 
 Local domains such as `localhost` and `127.0.0.1` derive `ws://` and `http://`; other domains derive `wss://` and `https://`.
 
-Watch suffixes are derived from each calendar ID, so they stay stable across restarts. Channels for calendars that are no longer visible are stopped and removed from the settings file.
+Event watch suffixes are derived from each calendar ID, so they stay stable across restarts. The CalendarList watch uses `_CALENDAR_LIST`. Channels for calendars that are no longer visible are stopped and removed from the settings file.
 
 ## Reliability behavior
 
@@ -76,6 +76,7 @@ Watch suffixes are derived from each calendar ID, so they stay stable across res
 |---|---|
 | Access token | Refreshes 60 seconds before expiry and retries once on HTTP 401 |
 | Fallback sync | Rediscovers visible calendars and refetches their events every 15 minutes by default |
+| CalendarList watch | Signals visibility changes; the client rediscovers calendars, rebuilds watches, and refetches events |
 | Webhook watch | One channel per visible calendar; checked hourly and renewed when less than 24 hours remain |
 | Watch rotation | Stops the previous channel before creating a replacement, and stops channels for calendars no longer visible |
 | Signal routing | Client subscribes its channel IDs over WSS; the Worker routes matching signals, and the client verifies them again |

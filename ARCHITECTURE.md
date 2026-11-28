@@ -17,11 +17,11 @@ Google Calendar
   -> Rust dashboard client
 ```
 
-The Worker relays signals. The client authenticates with Google, fetches events, and registers the webhook watches.
+The Worker relays signals. The client authenticates with Google, fetches events, and registers two kinds of webhook watches: one CalendarList watch for visibility changes and one event watch per visible calendar.
 
 ## Multi-user behavior
 
-Every client uses the same webhook URL, but each one generates its own random channel IDs when it registers watches with Google. The client discovers the calendars currently shown in the Google Calendar UI and creates one watch per visible calendar. Setting keys use a stable suffix derived from the calendar ID:
+Every client uses the same webhook URL, but each one generates its own random channel IDs when it registers watches with Google. The client discovers the calendars currently shown in the Google Calendar UI and creates one watch per visible calendar, plus one watch for the CalendarList itself. Event watch setting keys use a stable suffix derived from the calendar ID:
 
 ```text
 GOOGLE_CHANNEL_ID_<calendar-suffix>
@@ -30,7 +30,7 @@ GOOGLE_CHANNEL_EXPIRATION_<calendar-suffix>
 GOOGLE_CHANNEL_CALENDAR_<calendar-suffix>
 ```
 
-Those IDs are stored in that user's `dashboard-settings.txt`. Channels for calendars that are no longer visible are stopped and removed.
+The CalendarList watch uses the `_CALENDAR_LIST` suffix. Those IDs are stored in that user's `dashboard-settings.txt`. Channels for calendars that are no longer visible are stopped and removed.
 
 On WebSocket connect, the client sends:
 

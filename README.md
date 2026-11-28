@@ -30,7 +30,7 @@ Status messages and incoming signals go to `dashboard.log` next to the executabl
 
 ### Setting up your calendars
 
-The dashboard mirrors the calendars checked and shown in Google Calendar. Calendars you hide or uncheck there are ignored, and the app refreshes that visibility list automatically.
+The dashboard mirrors the calendars checked and shown in Google Calendar. Calendars you hide or uncheck there are ignored, and a CalendarList webhook tells the app to refresh that visibility list right away.
 
 | Visible calendar | What it is used for |
 |---|---|

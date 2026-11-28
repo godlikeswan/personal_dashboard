@@ -9,6 +9,11 @@ use crate::config;
 use crate::tokens::TokenManager;
 
 const CHANNELS_STOP_URL: &str = "https://www.googleapis.com/calendar/v3/channels/stop";
+const CALENDAR_LIST_WATCH_URL: &str =
+    "https://www.googleapis.com/calendar/v3/users/me/calendarList/watch";
+const CALENDAR_LIST_RESOURCE: &str = "calendarList";
+
+pub const CALENDAR_LIST_SUFFIX: &str = "_CALENDAR_LIST";
 
 #[derive(Clone)]
 pub struct WatchConfig {
@@ -34,6 +39,74 @@ pub fn configured_channel_ids() -> Vec<String> {
         .into_iter()
         .filter_map(|suffix| config::file_nonempty(&format!("GOOGLE_CHANNEL_ID{suffix}")))
         .collect()
+}
+
+pub fn calendar_list_channel_id() -> Option<String> {
+    config::file_nonempty(&format!("GOOGLE_CHANNEL_ID{CALENDAR_LIST_SUFFIX}"))
+}
+
+pub async fn ensure_calendar_list_channel(tokens: &TokenManager) -> Result<String, String> {
+    let access_token = tokens.access_token().await?;
+
+    let id_key = format!("GOOGLE_CHANNEL_ID{CALENDAR_LIST_SUFFIX}");
+    let resource_key = format!("GOOGLE_CHANNEL_RESOURCE_ID{CALENDAR_LIST_SUFFIX}");
+    let expiration_key = format!("GOOGLE_CHANNEL_EXPIRATION{CALENDAR_LIST_SUFFIX}");
+    let list_key = format!("GOOGLE_CHANNEL_CALENDAR{CALENDAR_LIST_SUFFIX}");
+
+    let channel_id = config::file_nonempty(&id_key);
+    let resource_id = config::file_nonempty(&resource_key);
+    let watched_list = config::file_nonempty(&list_key);
+    let expiration =
+        config::file_nonempty(&expiration_key).and_then(|value| config::parse_expiry(&value));
+
+    if let (Some(_), Some(_), Some(expiration)) = (&channel_id, &resource_id, expiration) {
+        if watched_list.as_deref() == Some(CALENDAR_LIST_RESOURCE)
+            && expiration > Utc::now() + Duration::hours(24)
+        {
+            return Ok(format!(
+                "Calendar-list watch valid until {}",
+                expiration.format("%Y-%m-%d %H:%M UTC")
+            ));
+        }
+    }
+
+    let mut stop_note = String::new();
+    if let (Some(old_id), Some(old_resource_id)) = (&channel_id, &resource_id) {
+        match stop_channel(&access_token, old_id, old_resource_id).await {
+            Ok(()) => stop_note.push_str("; old channel stopped"),
+            Err(error) => stop_note.push_str(&format!("; old channel stop failed: {error}")),
+        }
+    }
+
+    let new_channel_id = config::random_token(16);
+    let response = create_watch_at(
+        &access_token,
+        CALENDAR_LIST_WATCH_URL,
+        &new_channel_id,
+        &config::google_webhook_url(),
+    )
+    .await?;
+
+    let expiration = response.expiration.unwrap_or_else(|| {
+        (Utc::now() + Duration::days(6))
+            .timestamp_millis()
+            .to_string()
+    });
+
+    config::update_env(&[
+        (id_key.as_str(), response.id),
+        (resource_key.as_str(), response.resource_id),
+        (expiration_key.as_str(), expiration.clone()),
+        (list_key.as_str(), CALENDAR_LIST_RESOURCE.to_string()),
+    ])?;
+
+    let readable = config::parse_expiry(&expiration)
+        .map(|time| time.format("%Y-%m-%d %H:%M UTC").to_string())
+        .unwrap_or_else(|| expiration.clone());
+
+    Ok(format!(
+        "Calendar-list watch renewed until {readable}{stop_note}"
+    ))
 }
 
 pub async fn ensure_channel(
@@ -115,10 +188,11 @@ pub async fn stop_stale_channels(
     tokens: &TokenManager,
     desired: &[WatchConfig],
 ) -> Result<Vec<String>, String> {
-    let desired_suffixes = desired
+    let mut desired_suffixes = desired
         .iter()
         .map(|config_values| config_values.env_suffix.clone())
         .collect::<BTreeSet<_>>();
+    desired_suffixes.insert(CALENDAR_LIST_SUFFIX.to_string());
     let stale_suffixes = config::channel_suffixes()
         .into_iter()
         .filter(|suffix| !desired_suffixes.contains(suffix))
@@ -171,7 +245,15 @@ async fn create_watch(
     let encoded_calendar = urlencoding::encode(calendar_id);
     let url =
         format!("https://www.googleapis.com/calendar/v3/calendars/{encoded_calendar}/events/watch");
+    create_watch_at(access_token, &url, channel_id, webhook_url).await
+}
 
+async fn create_watch_at(
+    access_token: &str,
+    url: &str,
+    channel_id: &str,
+    webhook_url: &str,
+) -> Result<WatchResponse, String> {
     let body = json!({
         "id": channel_id,
         "type": "web_hook",

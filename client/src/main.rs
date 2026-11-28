@@ -55,6 +55,13 @@ enum AppEvent {
     WeatherError(String),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SignalAction {
+    None,
+    Fetch,
+    Discover,
+}
+
 struct DashboardApp {
     ctx: egui::Context,
     tx: UnboundedSender<AppEvent>,
@@ -316,6 +323,20 @@ impl DashboardApp {
     }
 
     fn spawn_watch_check_once(&self) {
+        let list_ctx = self.ctx.clone();
+        let list_tx = self.tx.clone();
+        let list_tokens = self.tokens.clone();
+        self._runtime.spawn(async move {
+            match watch::ensure_calendar_list_channel(&list_tokens).await {
+                Ok(status) => send(&list_ctx, &list_tx, AppEvent::WatchStatus(status)),
+                Err(error) => send(
+                    &list_ctx,
+                    &list_tx,
+                    AppEvent::WatchStatus(format!("Calendar-list watch error: {error}")),
+                ),
+            }
+        });
+
         let configs = match self.watch_configs.read() {
             Ok(guard) => guard.clone(),
             Err(_) => return,
@@ -362,42 +383,63 @@ impl DashboardApp {
     }
 
     fn record_message(&mut self, text: String) {
-        let mut should_fetch = false;
-
-        let summary = match serde_json::from_str::<serde_json::Value>(&text) {
-            Ok(value) => {
-                let kind = value
-                    .get("type")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or("unknown");
-                let state = value
-                    .get("state")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or("-");
-
-                if kind == "calendar-changed" {
-                    let channel_id = value
-                        .get("channelId")
-                        .and_then(|value| value.as_str())
-                        .unwrap_or("");
-                    if known_channel_ids().iter().any(|known| known == channel_id) {
-                        should_fetch = true;
-                        format!("{kind} | state: {state}")
-                    } else {
-                        format!("{kind} | ignored (unknown channel)")
-                    }
-                } else {
-                    format!("{kind} | state: {state}")
-                }
-            }
-            Err(_) => text.clone(),
-        };
+        let known_ids = known_channel_ids();
+        let calendar_list_id = watch::calendar_list_channel_id();
+        let (summary, action) = classify_signal(&text, calendar_list_id.as_deref(), &known_ids);
 
         self.latest_signal = summary;
 
-        if should_fetch {
-            self.spawn_fetch_all();
+        match action {
+            SignalAction::Discover => self.spawn_discover_calendars(),
+            SignalAction::Fetch => self.spawn_fetch_all(),
+            SignalAction::None => {}
         }
+    }
+}
+
+fn classify_signal(
+    text: &str,
+    calendar_list_id: Option<&str>,
+    known_ids: &[String],
+) -> (String, SignalAction) {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+        return (text.to_string(), SignalAction::None);
+    };
+
+    let kind = value
+        .get("type")
+        .and_then(|value| value.as_str())
+        .unwrap_or("unknown");
+    let state = value
+        .get("state")
+        .and_then(|value| value.as_str())
+        .unwrap_or("-");
+
+    if kind != "calendar-changed" {
+        return (format!("{kind} | state: {state}"), SignalAction::None);
+    }
+
+    let channel_id = value
+        .get("channelId")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+
+    if let Some(calendar_list_id) = calendar_list_id {
+        if !calendar_list_id.is_empty() && channel_id == calendar_list_id {
+            return (
+                format!("{kind} | calendar list changed | state: {state}"),
+                SignalAction::Discover,
+            );
+        }
+    }
+
+    if known_ids.iter().any(|known| known == channel_id) {
+        (format!("{kind} | state: {state}"), SignalAction::Fetch)
+    } else {
+        (
+            format!("{kind} | ignored (unknown channel)"),
+            SignalAction::None,
+        )
     }
 }
 
@@ -1737,6 +1779,15 @@ async fn watch_loop(
     watch_configs: Arc<RwLock<Vec<WatchConfig>>>,
 ) {
     loop {
+        match watch::ensure_calendar_list_channel(&tokens).await {
+            Ok(status) => send(&ctx, &tx, AppEvent::WatchStatus(status)),
+            Err(error) => send(
+                &ctx,
+                &tx,
+                AppEvent::WatchStatus(format!("Calendar-list watch error: {error}")),
+            ),
+        }
+
         let configs = match watch_configs.read() {
             Ok(guard) => guard.clone(),
             Err(_) => Vec::new(),
@@ -1836,6 +1887,44 @@ fn send(ctx: &egui::Context, tx: &UnboundedSender<AppEvent>, event: AppEvent) {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    #[test]
+    fn calendar_list_signal_triggers_discovery() {
+        let known = vec!["LIST".to_string(), "EVENT".to_string()];
+        let (summary, action) = classify_signal(
+            r#"{"type":"calendar-changed","channelId":"LIST","state":"exists"}"#,
+            Some("LIST"),
+            &known,
+        );
+
+        assert_eq!(action, SignalAction::Discover);
+        assert!(summary.contains("calendar list changed"));
+    }
+
+    #[test]
+    fn event_signal_triggers_fetch() {
+        let known = vec!["LIST".to_string(), "EVENT".to_string()];
+        let (_, action) = classify_signal(
+            r#"{"type":"calendar-changed","channelId":"EVENT","state":"exists"}"#,
+            Some("LIST"),
+            &known,
+        );
+
+        assert_eq!(action, SignalAction::Fetch);
+    }
+
+    #[test]
+    fn unknown_signal_is_ignored() {
+        let known = vec!["LIST".to_string(), "EVENT".to_string()];
+        let (summary, action) = classify_signal(
+            r#"{"type":"calendar-changed","channelId":"OTHER","state":"exists"}"#,
+            Some("LIST"),
+            &known,
+        );
+
+        assert_eq!(action, SignalAction::None);
+        assert!(summary.contains("ignored"));
+    }
 
     #[test]
     fn schedule_time_formats_timed_event() {
