@@ -507,25 +507,20 @@ fn task_font_size(ui: &egui::Ui, tasks: &[(bool, String)], max_width: f32) -> f3
     (reference_size * available / longest_title.max(1.0)).clamp(18.0, 36.0)
 }
 
-fn paint_bold_text_left_top(
+fn paint_bold_text(
     painter: &egui::Painter,
     pos: egui::Pos2,
+    align: egui::Align2,
     text: String,
     font: egui::FontId,
     color: egui::Color32,
 ) -> egui::Rect {
-    let mut rect = painter.text(
-        pos,
-        egui::Align2::LEFT_TOP,
-        text.clone(),
-        font.clone(),
-        color,
-    );
+    let mut rect = painter.text(pos, align.clone(), text.clone(), font.clone(), color);
 
     for offset in [egui::vec2(BOLD_OFFSET, 0.0), egui::vec2(0.0, BOLD_OFFSET)] {
         let pass = painter.text(
             pos + offset,
-            egui::Align2::LEFT_TOP,
+            align.clone(),
             text.clone(),
             font.clone(),
             color,
@@ -534,6 +529,16 @@ fn paint_bold_text_left_top(
     }
 
     rect
+}
+
+fn paint_bold_text_left_top(
+    painter: &egui::Painter,
+    pos: egui::Pos2,
+    text: String,
+    font: egui::FontId,
+    color: egui::Color32,
+) -> egui::Rect {
+    paint_bold_text(painter, pos, egui::Align2::LEFT_TOP, text, font, color)
 }
 
 fn draw_bold_label(ui: &mut egui::Ui, text: String, font: egui::FontId, color: egui::Color32) {
@@ -1102,6 +1107,18 @@ fn segment_number_color(color: Option<EventColor>) -> egui::Color32 {
         .unwrap_or(egui::Color32::WHITE)
 }
 
+fn number_shadow_color(text_color: egui::Color32) -> egui::Color32 {
+    let luminance =
+        (299 * text_color.r() as u32 + 587 * text_color.g() as u32 + 114 * text_color.b() as u32)
+            / 1000;
+
+    if luminance > 140 {
+        egui::Color32::from_black_alpha(115)
+    } else {
+        egui::Color32::from_white_alpha(115)
+    }
+}
+
 fn draw_five_day_timeline(
     ui: &mut egui::Ui,
     rect: egui::Rect,
@@ -1316,13 +1333,28 @@ fn draw_five_day_timeline(
             (segment.x0 + segment.x1) * 0.5,
             segment.y + segment.height * 0.5,
         );
+        let number_text = number.to_string();
+        let number_font = egui::FontId::proportional(font_size);
+        let number_color = segment_number_color(segment.color);
+        let (text_width, text_height) = ui.ctx().fonts_mut(|fonts| {
+            let size = fonts
+                .layout_no_wrap(number_text.clone(), number_font.clone(), number_color)
+                .size();
+            (size.x, size.y)
+        });
 
-        painter.text(
+        let backdrop = egui::Rect::from_center_size(
+            center,
+            egui::vec2(text_width + 10.0, text_height + 4.0 + BOLD_OFFSET),
+        );
+        painter.rect_filled(backdrop, 4.0, number_shadow_color(number_color));
+        paint_bold_text(
+            painter,
             center,
             egui::Align2::CENTER_CENTER,
-            number.to_string(),
-            egui::FontId::proportional(font_size),
-            segment_number_color(segment.color),
+            number_text,
+            number_font,
+            number_color,
         );
     }
 
@@ -1774,6 +1806,17 @@ mod tests {
             segment_number_color(Some(color)),
             egui::Color32::from_rgb(200, 210, 220)
         );
+    }
+
+    #[test]
+    fn number_shadow_contrasts_with_text_color() {
+        let dark_shadow = number_shadow_color(egui::Color32::WHITE);
+        let light_shadow = number_shadow_color(egui::Color32::BLACK);
+
+        assert!(dark_shadow.r() < 5 && dark_shadow.g() < 5 && dark_shadow.b() < 5);
+        assert_eq!(light_shadow.r(), light_shadow.a());
+        assert_eq!(light_shadow.g(), light_shadow.a());
+        assert_eq!(light_shadow.b(), light_shadow.a());
     }
 
     #[test]
