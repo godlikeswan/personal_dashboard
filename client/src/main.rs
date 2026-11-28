@@ -3,6 +3,7 @@
 mod calendar;
 mod config;
 mod demo;
+mod discord;
 mod logging;
 mod oauth;
 mod tokens;
@@ -51,6 +52,9 @@ enum AppEvent {
     TodoEvents(Vec<CalendarEvent>),
     ImportantEvents(Vec<CalendarEvent>),
     GeneralEvents(Vec<CalendarEvent>),
+    DiscordEvents(Vec<CalendarEvent>),
+    DiscordStatus(String),
+    DiscordChanged,
     Weather(Weather),
     WeatherError(String),
 }
@@ -77,6 +81,8 @@ struct DashboardApp {
     todo_events: Vec<CalendarEvent>,
     important_events: Vec<CalendarEvent>,
     general_events: Vec<CalendarEvent>,
+    discord_events: Vec<CalendarEvent>,
+    discord_status: String,
     weather: Option<Weather>,
     weather_status: String,
     tokens: TokenManager,
@@ -98,6 +104,7 @@ impl DashboardApp {
         let has_refresh_token = config::env_nonempty("GOOGLE_REFRESH_TOKEN").is_some();
         let has_client_id = config::google_client_id().is_some();
         let demo_mode = demo::enabled();
+        let discord_enabled = discord::enabled();
 
         let (tx, rx) = mpsc::unbounded_channel();
 
@@ -128,6 +135,8 @@ impl DashboardApp {
                 todo_events: demo::todo_events(now),
                 important_events: demo::important_events(now),
                 general_events: demo::general_events(now),
+                discord_events: Vec::new(),
+                discord_status: "Demo data".to_string(),
                 weather: Some(demo::weather()),
                 weather_status: "Demo weather".to_string(),
                 tokens,
@@ -171,6 +180,20 @@ impl DashboardApp {
             watch_loop(watch_ctx, watch_tx, watch_tokens, watch_configs_for_loop).await;
         });
 
+        if discord_enabled {
+            let discord_ctx = ctx.clone();
+            let discord_tx = tx.clone();
+            runtime.spawn(async move {
+                discord::gateway_loop(discord_ctx, discord_tx).await;
+            });
+
+            let poll_ctx = ctx.clone();
+            let poll_tx = tx.clone();
+            runtime.spawn(async move {
+                discord_poll_loop(poll_ctx, poll_tx).await;
+            });
+        }
+
         let signed_in = has_refresh_token;
         let auto_login = !signed_in && has_client_id;
 
@@ -206,6 +229,12 @@ impl DashboardApp {
             todo_events: Vec::new(),
             important_events: Vec::new(),
             general_events: Vec::new(),
+            discord_events: Vec::new(),
+            discord_status: if discord_enabled {
+                "Discord connecting".to_string()
+            } else {
+                "Discord disabled".to_string()
+            },
             weather: None,
             weather_status: "Loading weather...".to_string(),
             tokens,
@@ -215,7 +244,26 @@ impl DashboardApp {
         };
 
         app.spawn_discover_calendars();
+        if discord_enabled {
+            app.spawn_fetch_discord();
+        }
         app
+    }
+
+    fn spawn_fetch_discord(&self) {
+        let ctx = self.ctx.clone();
+        let tx = self.tx.clone();
+
+        self._runtime.spawn(async move {
+            match discord::fetch_events().await {
+                Ok(events) => send(&ctx, &tx, AppEvent::DiscordEvents(events)),
+                Err(error) => send(
+                    &ctx,
+                    &tx,
+                    AppEvent::DiscordStatus(format!("Fetch error: {error}")),
+                ),
+            }
+        });
     }
 
     fn spawn_fetch_all(&self) {
@@ -376,6 +424,12 @@ impl DashboardApp {
                 AppEvent::TodoEvents(events) => self.todo_events = events,
                 AppEvent::ImportantEvents(events) => self.important_events = events,
                 AppEvent::GeneralEvents(events) => self.general_events = events,
+                AppEvent::DiscordEvents(events) => self.discord_events = events,
+                AppEvent::DiscordStatus(status) => self.discord_status = status,
+                AppEvent::DiscordChanged => {
+                    self.latest_signal = "Discord event changed".to_string();
+                    self.spawn_fetch_discord();
+                }
                 AppEvent::Weather(weather) => self.weather = Some(weather),
                 AppEvent::WeatherError(error) => self.weather_status = error,
             }
@@ -459,7 +513,8 @@ impl eframe::App for DashboardApp {
         };
         let todo = self.todo_events.clone();
         let important = self.important_events.clone();
-        let general = self.general_events.clone();
+        let mut general = self.general_events.clone();
+        general.extend(self.discord_events.iter().cloned());
         let weather = self.weather.clone();
         let weather_status = self.weather_status.clone();
         let signing_in = self.signing_in;
@@ -576,8 +631,12 @@ impl eframe::App for DashboardApp {
 
         let debug_status = cfg!(debug_assertions).then(|| {
             format!(
-                "{}  |  {}  |  {}  |  {}",
-                self.status, self.fetch_status, self.watch_status, self.auth_status
+                "{}  |  {}  |  {}  |  {}  |  {}",
+                self.status,
+                self.fetch_status,
+                self.watch_status,
+                self.discord_status,
+                self.auth_status
             )
         });
         draw_bottom_strip(ui, now, &important, debug_status.as_deref());
@@ -1540,6 +1599,7 @@ fn main() -> eframe::Result {
         config::config_dir().display()
     ));
     logging::log(&format!("Relay domain: {}", config::relay_domain()));
+    logging::log(&format!("Discord configured: {}", discord::enabled()));
     logging::log(&format!(
         "Google client ID configured: {}",
         config::google_client_id().is_some()
@@ -1756,6 +1816,13 @@ async fn discovery_loop(
     }
 }
 
+async fn discord_poll_loop(ctx: egui::Context, tx: UnboundedSender<AppEvent>) {
+    loop {
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        send(&ctx, &tx, AppEvent::DiscordChanged);
+    }
+}
+
 async fn weather_loop(ctx: egui::Context, tx: UnboundedSender<AppEvent>) {
     loop {
         match weather::fetch_weather().await {
@@ -1867,6 +1934,7 @@ fn send(ctx: &egui::Context, tx: &UnboundedSender<AppEvent>, event: AppEvent) {
         | AppEvent::FetchError(text)
         | AppEvent::WatchStatus(text)
         | AppEvent::AuthStatus(text)
+        | AppEvent::DiscordStatus(text)
         | AppEvent::WeatherError(text) => logging::log(text),
         AppEvent::Message(text) => logging::log(&format!("signal: {text}")),
         AppEvent::AuthFinished
@@ -1876,6 +1944,8 @@ fn send(ctx: &egui::Context, tx: &UnboundedSender<AppEvent>, event: AppEvent) {
         | AppEvent::TodoEvents(_)
         | AppEvent::ImportantEvents(_)
         | AppEvent::GeneralEvents(_)
+        | AppEvent::DiscordEvents(_)
+        | AppEvent::DiscordChanged
         | AppEvent::Weather(_) => {}
     }
 

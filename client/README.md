@@ -28,6 +28,23 @@ GOOGLE_CLIENT_SECRET_OVERRIDE=your-client-secret
 
 The refresh token, access token, expiry, and webhook channel IDs are written to the same file by the sign-in flow.
 
+## Discord scheduled events
+
+The Discord path stays local to the client. A bot token is stored in `dashboard-settings.txt`, connects to the Discord Gateway for instant create/update/delete and Interested changes, and refreshes the event list from Discord's REST API. Events you marked Interested join the same five-day timeline as Google events.
+
+1. Create an app in the [Discord Developer Portal](https://discord.com/developers/applications) and add a bot to it.
+2. Copy the bot token into `DISCORD_BOT_TOKEN`.
+3. Invite the bot to the guild with the `bot` scope. Voice and stage events also need **View Channels** on their channels.
+4. Enable Developer Mode in Discord, then use **Copy Server ID** for `DISCORD_GUILD_ID` and **Copy User ID** for `DISCORD_USER_ID`.
+5. Keep `DISCORD_INTERESTED_ONLY=true` to show only events you marked Interested. Set it to `false` while testing to show every visible event.
+
+```env
+DISCORD_BOT_TOKEN=your-bot-token
+DISCORD_GUILD_ID=123456789012345678
+DISCORD_USER_ID=123456789012345678
+DISCORD_INTERESTED_ONLY=true
+```
+
 ## Run
 
 From `client/`:
@@ -61,6 +78,10 @@ The window opens fullscreen. On Windows, press `Alt+F4` to exit. Status messages
 | `GOOGLE_CHANNEL_RESOURCE_ID*` | written by watch setup | Matching Google resource IDs |
 | `GOOGLE_CHANNEL_EXPIRATION*` | written by watch setup | Expiry timestamps for active watches |
 | `GOOGLE_CHANNEL_CALENDAR*` | written by watch setup | Calendar each watch belongs to |
+| `DISCORD_BOT_TOKEN` | unset | Bot token for local Discord scheduled-event access |
+| `DISCORD_GUILD_ID` | unset | Discord guild whose scheduled events are shown |
+| `DISCORD_USER_ID` | unset | Discord user whose Interested markers are matched |
+| `DISCORD_INTERESTED_ONLY` | `true` | Show only events marked Interested by that user |
 | `FALLBACK_SYNC_MINUTES` | `15` | Background refresh interval |
 | `WEATHER_LAT` | detected from IP | Latitude override |
 | `WEATHER_LON` | detected from IP | Longitude override |
@@ -80,6 +101,8 @@ Event watch suffixes are derived from each calendar ID, so they stay stable acro
 | Webhook watch | One channel per visible calendar; checked hourly and renewed when less than 24 hours remain |
 | Watch rotation | Stops the previous channel before creating a replacement, and stops channels for calendars no longer visible |
 | Signal routing | Client subscribes its channel IDs over WSS; the Worker routes matching signals, and the client verifies them again |
+| Discord Gateway | Refreshes Discord events immediately after event or Interested changes for the configured guild |
+| Discord fallback | Refetches Discord events once a minute in case a Gateway signal is missed |
 
 Set `FALLBACK_SYNC_MINUTES` to change the background refresh interval:
 

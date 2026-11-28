@@ -8,7 +8,7 @@ A fullscreen dashboard for a TV or always-on display:
 - a full-width five-day calendar timeline whose event bars show those numbers in their Google Calendar colors
 - an `Important` countdown strip pinned to the bottom
 
-Google Calendar changes arrive through a Cloudflare Worker and update the display live.
+Google Calendar changes arrive through a Cloudflare Worker and update the display live. Discord scheduled events marked Interested update locally through the Discord Gateway and join the same five-day timeline.
 
 ![Personal Dashboard screenshot](screenshot.png)
 
@@ -42,6 +42,16 @@ The dashboard mirrors the calendars checked and shown in Google Calendar. Calend
 Create a Google Calendar named **Todo** for tasks. Only events within a rolling ±24-hour window are shown. Event titles beginning with `[ ]` or `[x]` are rendered as checkboxes; the prefix itself is hidden.
 
 Create a Google Calendar named **Important** for countdowns. Each event appears in the bottom strip with the number of days remaining.
+
+### Discord scheduled events
+
+To include Discord events, add a bot token, the guild ID, and your Discord user ID to `dashboard-settings.txt`. The client connects to Discord directly and shows the events you marked Interested. Voice and stage events need the bot to have **View Channels** permission on their channels.
+
+```env
+DISCORD_BOT_TOKEN=your-bot-token
+DISCORD_GUILD_ID=123456789012345678
+DISCORD_USER_ID=123456789012345678
+```
 
 Weather location is detected from your IP address. To pin it to a place, add any of these to `dashboard-settings.txt` next to the executable:
 
