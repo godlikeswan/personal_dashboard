@@ -1107,15 +1107,15 @@ fn segment_number_color(color: Option<EventColor>) -> egui::Color32 {
         .unwrap_or(egui::Color32::WHITE)
 }
 
-fn number_shadow_color(text_color: egui::Color32) -> egui::Color32 {
+fn number_shadow_color(text_color: egui::Color32, alpha: u8) -> egui::Color32 {
     let luminance =
         (299 * text_color.r() as u32 + 587 * text_color.g() as u32 + 114 * text_color.b() as u32)
             / 1000;
 
     if luminance > 140 {
-        egui::Color32::from_black_alpha(115)
+        egui::Color32::from_black_alpha(alpha)
     } else {
-        egui::Color32::from_white_alpha(115)
+        egui::Color32::from_white_alpha(alpha)
     }
 }
 
@@ -1343,11 +1343,22 @@ fn draw_five_day_timeline(
             (size.x, size.y)
         });
 
-        let backdrop = egui::Rect::from_center_size(
-            center,
-            egui::vec2(text_width + 10.0, text_height + 4.0 + BOLD_OFFSET),
-        );
-        painter.rect_filled(backdrop, 4.0, number_shadow_color(number_color));
+        // Layered translucent rounded rects approximate a soft blurred halo.
+        for (padding, alpha) in [(10.0, 16), (7.0, 22), (4.0, 28), (1.0, 34)] {
+            let backdrop = egui::Rect::from_center_size(
+                center,
+                egui::vec2(
+                    text_width + padding * 2.0 + 4.0,
+                    text_height + padding + 4.0 + BOLD_OFFSET,
+                ),
+            );
+            painter.rect_filled(
+                backdrop,
+                3.0 + padding * 0.35,
+                number_shadow_color(number_color, alpha),
+            );
+        }
+
         paint_bold_text(
             painter,
             center,
@@ -1810,8 +1821,8 @@ mod tests {
 
     #[test]
     fn number_shadow_contrasts_with_text_color() {
-        let dark_shadow = number_shadow_color(egui::Color32::WHITE);
-        let light_shadow = number_shadow_color(egui::Color32::BLACK);
+        let dark_shadow = number_shadow_color(egui::Color32::WHITE, 32);
+        let light_shadow = number_shadow_color(egui::Color32::BLACK, 32);
 
         assert!(dark_shadow.r() < 5 && dark_shadow.g() < 5 && dark_shadow.b() < 5);
         assert_eq!(light_shadow.r(), light_shadow.a());
