@@ -25,11 +25,16 @@ use weather::Weather;
 
 const WATCH_CHECK_SECONDS: u64 = 60 * 60;
 const WEATHER_CHECK_SECONDS: u64 = 15 * 60;
-const CLOCK_FONT_SIZE: f32 = 56.0;
-const DATE_FONT_SIZE: f32 = 32.0;
+const FONT_SCALE: f32 = 1.12;
+const CLOCK_FONT_SIZE: f32 = 56.0 * FONT_SCALE;
+const DATE_FONT_SIZE: f32 = 32.0 * FONT_SCALE;
 const SCHEDULE_ROW_FACTOR: f32 = 1.45;
 const BOTTOM_STRIP_HEIGHT: f32 = 92.0;
 const BOLD_OFFSET: f32 = 0.8;
+
+fn scaled_font_size(size: f32) -> f32 {
+    size * FONT_SCALE
+}
 
 enum AppEvent {
     Status(String),
@@ -347,7 +352,7 @@ impl eframe::App for DashboardApp {
         let signed_in = self.signed_in;
 
         // Top row: clock and date on the left, weather on the right.
-        let weather_font_size = 56.0;
+        let weather_font_size = CLOCK_FONT_SIZE;
         let weather_icon_size = 52.0;
         let weather_icon_y_offset = ui.ctx().fonts_mut(|fonts| {
             fonts.row_height(&egui::FontId::proportional(weather_font_size)) - weather_icon_size
@@ -366,10 +371,17 @@ impl eframe::App for DashboardApp {
                         egui::Color32::WHITE,
                     );
                 } else {
-                    ui.label(weather_status.as_str());
+                    ui.label(
+                        egui::RichText::new(weather_status.as_str()).size(scaled_font_size(14.0)),
+                    );
                 }
 
-                if !signed_in && !signing_in && ui.button("Sign in").clicked() {
+                if !signed_in
+                    && !signing_in
+                    && ui
+                        .button(egui::RichText::new("Sign in").size(scaled_font_size(14.0)))
+                        .clicked()
+                {
                     self.spawn_login();
                 }
             });
@@ -484,10 +496,10 @@ fn clean_task_title(summary: &str) -> (bool, String) {
 
 fn task_font_size(ui: &egui::Ui, tasks: &[(bool, String)], max_width: f32) -> f32 {
     if tasks.is_empty() {
-        return 18.0;
+        return scaled_font_size(18.0);
     }
 
-    let reference_size = 12.0;
+    let reference_size = scaled_font_size(12.0);
     let reference_font = egui::FontId::proportional(reference_size);
     let color = egui::Color32::WHITE;
     let longest_title = ui.ctx().fonts_mut(|fonts| {
@@ -504,7 +516,8 @@ fn task_font_size(ui: &egui::Ui, tasks: &[(bool, String)], max_width: f32) -> f3
 
     let checkbox_width = reference_size * 0.82 + 10.0;
     let available = (max_width - checkbox_width).max(1.0);
-    (reference_size * available / longest_title.max(1.0)).clamp(18.0, 36.0)
+    (reference_size * available / longest_title.max(1.0))
+        .clamp(scaled_font_size(18.0), scaled_font_size(36.0))
 }
 
 fn paint_bold_text(
@@ -683,10 +696,10 @@ fn numbered_schedule(
 
 fn schedule_font_size(ui: &egui::Ui, rows: &[ScheduleRow], max_width: f32, max_height: f32) -> f32 {
     if rows.is_empty() {
-        return 22.0;
+        return scaled_font_size(22.0);
     }
 
-    let reference_size = 12.0;
+    let reference_size = scaled_font_size(12.0);
     let reference_font = egui::FontId::proportional(reference_size);
     let color = egui::Color32::WHITE;
     let longest = ui.ctx().fonts_mut(|fonts| {
@@ -704,7 +717,9 @@ fn schedule_font_size(ui: &egui::Ui, rows: &[ScheduleRow], max_width: f32, max_h
     let width_font = reference_size * available_width / longest.max(1.0);
     let height_font = (max_height / rows.len() as f32 / SCHEDULE_ROW_FACTOR).max(0.0);
 
-    width_font.min(height_font).clamp(10.0, 34.0)
+    width_font
+        .min(height_font)
+        .clamp(scaled_font_size(10.0), scaled_font_size(34.0))
 }
 
 fn draw_task_panel(
@@ -722,7 +737,7 @@ fn draw_task_panel(
             egui::pos2(rect.min.x, rect.min.y + 4.0),
             egui::Align2::LEFT_TOP,
             "No tasks",
-            egui::FontId::proportional(font_size.min(18.0)),
+            egui::FontId::proportional(font_size.min(scaled_font_size(18.0))),
             color,
         );
         return;
@@ -802,7 +817,7 @@ fn draw_schedule_panel(
             egui::pos2(rect.min.x, rect.min.y + 4.0),
             egui::Align2::LEFT_TOP,
             "No upcoming events",
-            egui::FontId::proportional(font_size.min(18.0)),
+            egui::FontId::proportional(font_size.min(scaled_font_size(18.0))),
             color,
         );
         return;
@@ -1016,7 +1031,7 @@ fn draw_bottom_strip(
         .collect::<Vec<_>>();
     countdowns.sort_by_key(|(days, _)| *days);
 
-    let countdown_font_size = 32.0;
+    let countdown_font_size = DATE_FONT_SIZE;
     let countdown_row_height = ui
         .ctx()
         .fonts_mut(|fonts| fonts.row_height(&egui::FontId::proportional(countdown_font_size)));
@@ -1065,7 +1080,7 @@ fn draw_bottom_strip(
             egui::pos2(rect.min.x + 18.0, rect.max.y - 24.0),
             egui::Align2::LEFT_TOP,
             status,
-            egui::FontId::proportional(11.0),
+            egui::FontId::proportional(scaled_font_size(11.0)),
             weak_color,
         );
     }
@@ -1150,7 +1165,7 @@ fn draw_five_day_timeline(
             egui::pos2(x + 2.0, rect.max.y - 14.0),
             egui::Align2::LEFT_TOP,
             format!("{hour:02}"),
-            egui::FontId::proportional(10.0),
+            egui::FontId::proportional(scaled_font_size(10.0)),
             text_color,
         );
     }
@@ -1328,7 +1343,8 @@ fn draw_five_day_timeline(
             continue;
         };
 
-        let font_size = (segment.height * 0.78).clamp(12.0, 34.0);
+        let font_size = (segment.height * 0.78 * FONT_SCALE)
+            .clamp(scaled_font_size(12.0), scaled_font_size(34.0));
         let center = egui::pos2(
             (segment.x0 + segment.x1) * 0.5,
             segment.y + segment.height * 0.5,
