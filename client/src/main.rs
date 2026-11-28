@@ -1349,6 +1349,10 @@ fn draw_five_day_timeline(
             (segment.x0 + segment.x1) * 0.5,
             segment.y + segment.height * 0.5,
         );
+        let bar_rect = egui::Rect::from_min_max(
+            egui::pos2(segment.x0, segment.y),
+            egui::pos2(segment.x1, segment.y + segment.height),
+        );
         let number_text = number.to_string();
         let number_font = egui::FontId::proportional(font_size);
         let number_color = segment_number_color(segment.color);
@@ -1360,19 +1364,28 @@ fn draw_five_day_timeline(
         });
 
         // Layered translucent rounded rects approximate a soft blurred halo.
+        // Keep every layer inside the event bar so it never pokes out.
         for (padding, alpha) in [(10.0, 16), (7.0, 22), (4.0, 28), (1.0, 34)] {
-            let backdrop = egui::Rect::from_center_size(
+            let mut backdrop = egui::Rect::from_center_size(
                 center,
                 egui::vec2(
                     text_width + padding * 2.0 + 4.0,
                     text_height + padding + 4.0 + BOLD_OFFSET,
                 ),
             );
-            painter.rect_filled(
-                backdrop,
-                3.0 + padding * 0.35,
-                number_shadow_color(number_color, alpha),
-            );
+            backdrop.min.x = backdrop.min.x.max(bar_rect.min.x);
+            backdrop.min.y = backdrop.min.y.max(bar_rect.min.y);
+            backdrop.max.x = backdrop.max.x.min(bar_rect.max.x);
+            backdrop.max.y = backdrop.max.y.min(bar_rect.max.y);
+
+            if backdrop.width() <= 0.0 || backdrop.height() <= 0.0 {
+                continue;
+            }
+
+            let radius = (3.0 + padding * 0.35)
+                .min(backdrop.width() * 0.5)
+                .min(backdrop.height() * 0.5);
+            painter.rect_filled(backdrop, radius, number_shadow_color(number_color, alpha));
         }
 
         paint_bold_text(
