@@ -29,6 +29,7 @@ const CLOCK_FONT_SIZE: f32 = 56.0;
 const DATE_FONT_SIZE: f32 = 32.0;
 const SCHEDULE_ROW_FACTOR: f32 = 1.45;
 const BOTTOM_STRIP_HEIGHT: f32 = 92.0;
+const BOLD_OFFSET: f32 = 0.8;
 
 enum AppEvent {
     Status(String),
@@ -358,11 +359,11 @@ impl eframe::App for DashboardApp {
             columns[1].with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
                 if let Some(current) = &weather {
                     draw_weather_icon(ui, current.code, weather_icon_size, weather_icon_y_offset);
-                    ui.label(
-                        egui::RichText::new(format!("{:.0}°C", current.temperature))
-                            .size(weather_font_size)
-                            .strong()
-                            .color(egui::Color32::WHITE),
+                    draw_bold_label(
+                        ui,
+                        format!("{:.0}°C", current.temperature),
+                        egui::FontId::proportional(weather_font_size),
+                        egui::Color32::WHITE,
                     );
                 } else {
                     ui.label(weather_status.as_str());
@@ -506,6 +507,51 @@ fn task_font_size(ui: &egui::Ui, tasks: &[(bool, String)], max_width: f32) -> f3
     (reference_size * available / longest_title.max(1.0)).clamp(18.0, 36.0)
 }
 
+fn paint_bold_text_left_top(
+    painter: &egui::Painter,
+    pos: egui::Pos2,
+    text: String,
+    font: egui::FontId,
+    color: egui::Color32,
+) -> egui::Rect {
+    let mut rect = painter.text(
+        pos,
+        egui::Align2::LEFT_TOP,
+        text.clone(),
+        font.clone(),
+        color,
+    );
+
+    for offset in [egui::vec2(BOLD_OFFSET, 0.0), egui::vec2(0.0, BOLD_OFFSET)] {
+        let pass = painter.text(
+            pos + offset,
+            egui::Align2::LEFT_TOP,
+            text.clone(),
+            font.clone(),
+            color,
+        );
+        rect = rect.union(pass);
+    }
+
+    rect
+}
+
+fn draw_bold_label(ui: &mut egui::Ui, text: String, font: egui::FontId, color: egui::Color32) {
+    let (width, height) = ui.ctx().fonts_mut(|fonts| {
+        (
+            fonts
+                .layout_no_wrap(text.clone(), font.clone(), color)
+                .size()
+                .x
+                + BOLD_OFFSET,
+            fonts.row_height(&font) + BOLD_OFFSET,
+        )
+    });
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
+
+    paint_bold_text_left_top(ui.painter(), rect.min, text, font, color);
+}
+
 fn draw_clock_date(ui: &mut egui::Ui, now: DateTime<Local>) {
     let time_font = egui::FontId::proportional(CLOCK_FONT_SIZE);
     let date_font = egui::FontId::proportional(DATE_FONT_SIZE);
@@ -517,12 +563,13 @@ fn draw_clock_date(ui: &mut egui::Ui, now: DateTime<Local>) {
         let time_width = fonts
             .layout_no_wrap(time.clone(), time_font.clone(), color)
             .size()
-            .x;
+            .x
+            + BOLD_OFFSET;
         let date_width = fonts
             .layout_no_wrap(date.clone(), date_font.clone(), color)
             .size()
             .x;
-        let time_height = fonts.row_height(&time_font);
+        let time_height = fonts.row_height(&time_font) + BOLD_OFFSET;
         (time_width, date_width, time_height)
     });
 
@@ -536,13 +583,7 @@ fn draw_clock_date(ui: &mut egui::Ui, now: DateTime<Local>) {
     // Offset the smaller text so both strings sit on the same visual baseline.
     let date_top_shift = (CLOCK_FONT_SIZE - DATE_FONT_SIZE) * 0.93;
 
-    painter.text(
-        egui::pos2(rect.min.x, rect.min.y),
-        egui::Align2::LEFT_TOP,
-        time,
-        time_font,
-        color,
-    );
+    paint_bold_text_left_top(painter, rect.min, time, time_font, color);
     painter.text(
         egui::pos2(rect.min.x + time_width + gap, rect.min.y + date_top_shift),
         egui::Align2::LEFT_TOP,
@@ -990,16 +1031,25 @@ fn draw_bottom_strip(
     let y = countdown_y;
     let font = egui::FontId::proportional(countdown_font_size);
     for (days, summary) in countdowns {
-        let text = countdown_label(days, &summary);
+        let label = countdown_label(days, &summary);
+        let number_len = format!("{days}d").len();
+        let (number, rest) = label.split_at(number_len);
 
-        let used = painter.text(
+        let number_rect = paint_bold_text_left_top(
+            painter,
             egui::pos2(x, y),
-            egui::Align2::LEFT_TOP,
-            text,
+            number.to_string(),
             font.clone(),
             egui::Color32::WHITE,
         );
-        x = used.max.x + 48.0;
+        let rest_rect = painter.text(
+            egui::pos2(number_rect.max.x, y),
+            egui::Align2::LEFT_TOP,
+            rest.to_string(),
+            font.clone(),
+            egui::Color32::WHITE,
+        );
+        x = rest_rect.max.x + 48.0;
         if x > rect.max.x - 180.0 {
             break;
         }
@@ -1229,7 +1279,8 @@ fn draw_five_day_timeline(
         segment.height = (lane_height - 2.0).max(3.0);
     }
 
-    // Draw every bar before the now line so the line stays visible over events.
+    // Draw every bar first, then every number, so later events cannot paint over
+    // an earlier event's number.
     for segment in &segments {
         let fill = segment_fill(segment.color, segment.all_day);
         painter.rect_filled(
@@ -1253,16 +1304,8 @@ fn draw_five_day_timeline(
         }
     }
 
-    let now_seconds = now.hour() * 3600 + now.minute() * 60 + now.second();
-    let now_x = plot_x + (now_seconds as f32 / 86_400.0) * plot_width;
-    painter.vline(
-        now_x,
-        egui::Rangef::new(rect.min.y, rect.min.y + row_height),
-        egui::Stroke::new(1.5, egui::Color32::from_rgb(255, 90, 90)),
-    );
-
-    // Draw every number last, so later events cannot paint over an earlier
-    // event's number and the now line cannot obscure the labels.
+    // Draw every number before the now line, so later events cannot paint over
+    // an earlier event's number and the line stays fully visible.
     for segment in &segments {
         let Some(number) = segment.number else {
             continue;
@@ -1282,6 +1325,14 @@ fn draw_five_day_timeline(
             segment_number_color(segment.color),
         );
     }
+
+    let now_seconds = now.hour() * 3600 + now.minute() * 60 + now.second();
+    let now_x = plot_x + (now_seconds as f32 / 86_400.0) * plot_width;
+    painter.vline(
+        now_x,
+        egui::Rangef::new(rect.min.y, rect.min.y + row_height),
+        egui::Stroke::new(1.5, egui::Color32::from_rgb(255, 90, 90)),
+    );
 
     ui.allocate_rect(rect, egui::Sense::hover());
 }
