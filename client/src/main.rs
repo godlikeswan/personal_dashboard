@@ -1088,14 +1088,6 @@ fn draw_five_day_timeline(
         );
     }
 
-    let now_seconds = now.hour() * 3600 + now.minute() * 60 + now.second();
-    let now_x = plot_x + (now_seconds as f32 / 86_400.0) * plot_width;
-    painter.vline(
-        now_x,
-        egui::Rangef::new(rect.min.y, rect.min.y + row_height),
-        egui::Stroke::new(1.5, egui::Color32::from_rgb(255, 90, 90)),
-    );
-
     #[derive(Clone)]
     struct Segment {
         day_index: usize,
@@ -1237,8 +1229,7 @@ fn draw_five_day_timeline(
         segment.height = (lane_height - 2.0).max(3.0);
     }
 
-    // Draw every bar first, then every number, so later events cannot paint over
-    // an earlier event's number.
+    // Draw every bar before the now line so the line stays visible over events.
     for segment in &segments {
         let fill = segment_fill(segment.color, segment.all_day);
         painter.rect_filled(
@@ -1262,6 +1253,16 @@ fn draw_five_day_timeline(
         }
     }
 
+    let now_seconds = now.hour() * 3600 + now.minute() * 60 + now.second();
+    let now_x = plot_x + (now_seconds as f32 / 86_400.0) * plot_width;
+    painter.vline(
+        now_x,
+        egui::Rangef::new(rect.min.y, rect.min.y + row_height),
+        egui::Stroke::new(1.5, egui::Color32::from_rgb(255, 90, 90)),
+    );
+
+    // Draw every number last, so later events cannot paint over an earlier
+    // event's number and the now line cannot obscure the labels.
     for segment in &segments {
         let Some(number) = segment.number else {
             continue;
@@ -1428,17 +1429,27 @@ async fn websocket_loop(ctx: egui::Context, tx: UnboundedSender<AppEvent>, url: 
     }
 }
 
+fn fetch_window_start(now: DateTime<Local>) -> DateTime<Utc> {
+    now.date_naive()
+        .and_hms_opt(0, 0, 0)
+        .and_then(|start| start.and_local_timezone(Local).earliest())
+        .unwrap_or(now)
+        .to_utc()
+}
+
 async fn fetch_all_events(
     ctx: &egui::Context,
     tx: &UnboundedSender<AppEvent>,
     tokens: &TokenManager,
 ) {
-    let now = Utc::now();
+    let local_now = Local::now();
+    let now = local_now.to_utc();
+    let today_start = fetch_window_start(local_now);
 
     match calendar::fetch_events_in_range(
         tokens,
         "primary",
-        now,
+        today_start,
         now + ChronoDuration::days(5),
         100,
     )
@@ -1470,7 +1481,7 @@ async fn fetch_all_events(
     match calendar::fetch_events_in_range(
         tokens,
         "important",
-        now,
+        today_start,
         now + ChronoDuration::days(365),
         100,
     )
@@ -1681,6 +1692,20 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].summary, "Morning");
         assert_eq!(numbers[0], Some(1));
+    }
+
+    #[test]
+    fn fetch_window_starts_at_local_midnight() {
+        let now = Local
+            .with_ymd_and_hms(2077, 6, 15, 12, 0, 0)
+            .earliest()
+            .expect("valid test time");
+        let midnight = Local
+            .with_ymd_and_hms(2077, 6, 15, 0, 0, 0)
+            .earliest()
+            .expect("valid test time");
+
+        assert_eq!(fetch_window_start(now), midnight.to_utc());
     }
 
     #[test]
